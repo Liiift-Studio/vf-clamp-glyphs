@@ -6,8 +6,10 @@
 	<string>com.liiift-studio.vf-clamp</string>
 	<key>CFBundleName</key>
 	<string>vf-clamp</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>3</string>
 	<key>NSPrincipalClass</key>
 	<string>VFClampPlugin</string>
 </dict>
