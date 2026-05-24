@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Glyphs.app temp files
+*.glyphs~
+*.glyphx
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test font output
+*.ttf
+*.otf
+*.woff
+*.woff2
