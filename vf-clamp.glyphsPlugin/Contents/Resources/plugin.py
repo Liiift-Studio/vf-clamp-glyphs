@@ -172,6 +172,19 @@ def produce_restricted_vf(font_path, selected_names, family_name, output_path):
 	if not hull:
 		raise ValueError('No valid named instances found for the selected names.')
 
+	# Warn if any axis default falls outside the restricted range — fonttools silently clamps it.
+	fvar = font['fvar']
+	for ax in fvar.axes:
+		constraint = hull.get(ax.axisTag)
+		if isinstance(constraint, tuple):
+			lo, hi = constraint
+			if not (lo <= ax.defaultValue <= hi):
+				clamped = max(lo, min(hi, ax.defaultValue))
+				print(
+					f'Warning: {ax.axisTag} default ({ax.defaultValue}) is outside '
+					f'restricted range [{lo}, {hi}]. Default will be clamped to {clamped}.'
+				)
+
 	try:
 		partial = instancer.instantiateVariableFont(font, hull)
 	except Exception as e:
