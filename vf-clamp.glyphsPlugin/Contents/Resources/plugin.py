@@ -1,13 +1,24 @@
 # plugin.py — vf-clamp Glyphs.app plugin for generating restricted variable fonts
 
 import objc
-from GlyphsApp import *
-from GlyphsApp.plugins import *
-import vanilla
 import os
 import re
-from fontTools.varLib import instancer
-from fontTools.ttLib import TTFont
+import warnings
+
+from GlyphsApp import *
+from GlyphsApp.plugins import *
+
+import vanilla
+
+# Guard fonttools import so we can surface a useful error inside Glyphs
+# rather than crashing silently at startup.
+try:
+	from fontTools.varLib import instancer
+	from fontTools.ttLib import TTFont
+	_FONTTOOLS_AVAILABLE = True
+except ImportError as _ft_import_error:
+	_FONTTOOLS_AVAILABLE = False
+	_ft_import_error_msg = str(_ft_import_error)
 
 
 # ---------------------------------------------------------------------------
@@ -15,13 +26,25 @@ from fontTools.ttLib import TTFont
 # ---------------------------------------------------------------------------
 
 def compute_hull(font, selected_names):
-	"""Compute the axis hull (min/max per axis) across the selected named instances."""
+	"""Compute the per-axis hull (min/max) across the selected named instances.
+
+	Returns a dict mapping axis tag → scalar (pin) or AxisTriple (range).
+	Only axes that appear in the selected instances are included; any other
+	fvar axis is left unrestricted (not present in the returned dict).
+	"""
+	if 'fvar' not in font:
+		raise ValueError('This font has no fvar table — it is not a variable font.')
+
 	fvar = font['fvar']
 	name_table = font['name']
-	all_insts = {
-		name_table.getDebugName(inst.subfamilyNameID): dict(inst.coordinates)
-		for inst in fvar.instances
-	}
+
+	# Build a dict of instance name → {axis_tag: value}
+	all_insts = {}
+	for inst in fvar.instances:
+		label = name_table.getDebugName(inst.subfamilyNameID)
+		if label:
+			all_insts[label] = dict(inst.coordinates)
+
 	hull = {}
 	for name in selected_names:
 		if name not in all_insts:
@@ -32,76 +55,158 @@ def compute_hull(font, selected_names):
 			else:
 				hull[tag][0] = min(hull[tag][0], val)
 				hull[tag][1] = max(hull[tag][1], val)
+
 	result = {}
 	for tag, (lo, hi) in hull.items():
-		# Pinned axis: pass a scalar; ranged axis: pass AxisRange
-		result[tag] = lo if lo == hi else instancer.AxisRange(lo, hi)
+		if lo == hi:
+			# Pin the axis to a single value (scalar)
+			result[tag] = lo
+		else:
+			# Restrict axis to a range — use AxisTriple(min, None, max);
+			# None for default lets fonttools derive it from the fvar default.
+			# AxisRange() is deprecated and emits DeprecationWarning.
+			result[tag] = instancer.AxisTriple(lo, None, hi)
+
 	return result
 
 
 def patch_name_table(font, family_name):
-	"""Update name IDs 1, 4, 6, and optionally 16 and 25 to reflect the restricted VF."""
+	"""Update name IDs 1, 4, 6, and optionally 16 and 25 to reflect the restricted VF.
+
+	Handles both Windows (platformID=3, UTF-16-BE) and Mac (platformID=1, mac_roman)
+	records.  PostScript name (nameID 6 and 25) is sanitised to ASCII alphanumeric + dash.
+	nameID 2 (Subfamily) is intentionally left alone — the output is still variable.
+	"""
+	# PostScript name: only A-Z a-z 0-9 and hyphen, spaces replaced with hyphens
 	ps_name = re.sub(r'[^A-Za-z0-9-]', '', family_name.replace(' ', '-'))
+
 	name_table = font['name']
 	existing_ids = {r.nameID for r in name_table.names}
+
+	# Decide which name IDs to update
 	updates = {1: family_name, 4: family_name, 6: ps_name}
 	if 16 in existing_ids:
 		updates[16] = family_name
 	if 25 in existing_ids:
 		updates[25] = ps_name
+
+	# Track which (nameID, platformID, platEncID, langID) combos we have updated
+	updated = set()
+
 	for record in name_table.names:
 		if record.nameID not in updates:
 			continue
 		value = updates[record.nameID]
 		if record.platformID == 3:
+			# Windows: encode as UTF-16-BE
 			record.string = value.encode('utf-16-be')
 		elif record.platformID == 1:
+			# Mac: encode as mac_roman; fall back to ASCII with replacement
 			try:
 				record.string = value.encode('mac_roman')
-			except Exception:
+			except (UnicodeEncodeError, LookupError):
 				record.string = value.encode('ascii', errors='replace')
+		updated.add((record.nameID, record.platformID))
+
+	# Ensure at least a Windows (platformID=3) record exists for nameIDs we want to set.
+	# Some fonts only have platformID=1 records; add Windows records when absent.
+	for name_id, value in updates.items():
+		if (name_id, 3) not in updated:
+			name_table.setName(value, name_id, 3, 1, 0x0409)
 
 
 def compact_name(first, last):
-	"""Strip shared word prefix/suffix — e.g. 'Encode Sans Light' + 'Encode Sans Bold' → 'Encode Sans Light-Bold'."""
+	"""Strip shared word prefix/suffix and join differing parts with a hyphen.
+
+	Examples:
+	  'Encode Sans Light' + 'Encode Sans Bold'  → 'Encode Sans Light-Bold'
+	  'Light'                                    → 'Light'   (single instance)
+	  'Regular' + 'Regular'                      → 'Regular'
+	"""
 	if first == last:
 		return first
 	fw = first.split()
 	lw = last.split()
+
 	# Count shared prefix words
 	prefix_len = 0
 	while prefix_len < len(fw) and prefix_len < len(lw) and fw[prefix_len] == lw[prefix_len]:
 		prefix_len += 1
-	# Count shared suffix words (not overlapping prefix)
+
+	# Count shared suffix words (must not overlap with the prefix)
 	suffix_len = 0
-	while (suffix_len < len(fw) - prefix_len and
-		   suffix_len < len(lw) - prefix_len and
-		   fw[-1 - suffix_len] == lw[-1 - suffix_len]):
+	while (
+		suffix_len < len(fw) - prefix_len
+		and suffix_len < len(lw) - prefix_len
+		and fw[-1 - suffix_len] == lw[-1 - suffix_len]
+	):
 		suffix_len += 1
+
 	prefix = ' '.join(fw[:prefix_len])
 	a = ' '.join(fw[prefix_len: len(fw) - suffix_len if suffix_len else None])
 	b = ' '.join(lw[prefix_len: len(lw) - suffix_len if suffix_len else None])
 	suffix = ' '.join(fw[len(fw) - suffix_len:]) if suffix_len else ''
-	middle = f'{a}-{b}' if a and b else (a or b)
+
+	middle = f'{a}-{b}' if (a and b) else (a or b)
 	return ' '.join(filter(None, [prefix, middle, suffix]))
 
 
 def produce_restricted_vf(font_path, selected_names, family_name, output_path):
-	"""Load font_path, restrict axes to the hull of selected_names, patch names, and save to output_path."""
-	font = TTFont(font_path)
+	"""Load font_path, restrict axes to the hull of selected_names, patch names, and save.
+
+	Raises ValueError for bad input (no fvar, no valid instances).
+	Raises OSError for file I/O failures.
+	"""
+	if not _FONTTOOLS_AVAILABLE:
+		raise RuntimeError(f'fonttools is not available: {_ft_import_error_msg}')
+
+	try:
+		font = TTFont(font_path)
+	except Exception as e:
+		raise OSError(f'Cannot open font file: {e}') from e
+
+	if 'fvar' not in font:
+		raise ValueError('This font has no variable axes — it is not a variable font.')
+
 	hull = compute_hull(font, selected_names)
 	if not hull:
-		raise ValueError('No valid instances found for the selected names.')
-	partial = instancer.instantiateVariableFont(font, hull)
+		raise ValueError('No valid named instances found for the selected names.')
+
+	try:
+		partial = instancer.instantiateVariableFont(font, hull)
+	except Exception as e:
+		raise RuntimeError(f'instancer failed: {e}') from e
+
 	patch_name_table(partial, family_name)
-	partial.save(output_path)
+
+	# Ensure output directory exists
+	output_dir = os.path.dirname(output_path)
+	if output_dir:
+		os.makedirs(output_dir, exist_ok=True)
+
+	try:
+		partial.save(output_path)
+	except Exception as e:
+		raise OSError(f'Failed to save output font: {e}') from e
 
 
 def get_instance_names(font_path):
-	"""Return an ordered list of named-instance subfamily names from a variable font file."""
-	font = TTFont(font_path)
+	"""Return an ordered list of named-instance subfamily names from a variable font file.
+
+	Raises ValueError if the font has no fvar table.
+	Raises OSError if the file cannot be opened.
+	"""
+	if not _FONTTOOLS_AVAILABLE:
+		raise RuntimeError(f'fonttools is not available: {_ft_import_error_msg}')
+
+	try:
+		font = TTFont(font_path)
+	except Exception as e:
+		raise OSError(f'Cannot open font file: {e}') from e
+
 	if 'fvar' not in font:
-		raise ValueError('This font does not contain an fvar table — it is not a variable font.')
+		raise ValueError('This font has no variable axes — select a variable font (.ttf/.otf with an fvar table).')
+
 	name_table = font['name']
 	names = []
 	for inst in font['fvar'].instances:
@@ -112,7 +217,7 @@ def get_instance_names(font_path):
 
 
 def extension_for_format(fmt):
-	"""Return the file extension for a given format label (TTF, OTF, WOFF, WOFF2)."""
+	"""Return the file extension string for a given format label (TTF, OTF, WOFF, WOFF2)."""
 	return {
 		'TTF': '.ttf',
 		'OTF': '.otf',
@@ -135,16 +240,24 @@ class VFClampPlugin(GeneralPlugin):
 
 	@objc.python_method
 	def start(self):
-		"""Register the menu item under Script > vf-clamp."""
+		"""Register the menu item under Script › vf-clamp."""
 		newMenuItem = NSMenuItem.new()
 		newMenuItem.setTitle_('Generate Restricted VFs…')
+		# showDialog_ must NOT carry @objc.python_method so AppKit can call it
+		# as an Objective-C selector when the menu item is activated.
 		newMenuItem.setAction_(self.showDialog_)
 		newMenuItem.setTarget_(self)
 		Glyphs.menu[SCRIPT_MENU].append(newMenuItem)
 
-	@objc.python_method
+	# NOTE: no @objc.python_method here — AppKit calls this as an ObjC action selector.
 	def showDialog_(self, sender):
 		"""Open the vf-clamp dialog window."""
+		if not _FONTTOOLS_AVAILABLE:
+			Message(
+				f'vf-clamp requires fonttools, which could not be imported:\n\n{_ft_import_error_msg}',
+				'vf-clamp — Missing Dependency',
+			)
+			return
 		self.dialog = VFClampDialog()
 		self.dialog.show()
 
@@ -159,25 +272,25 @@ class VFClampPlugin(GeneralPlugin):
 # ---------------------------------------------------------------------------
 
 # Pixel metrics — all layout is top-down with fixed row heights
-_W = 480          # window width
+_W = 500          # window width
 _PAD = 16         # outer padding
 _LABEL_H = 20     # standard label height
 _FIELD_H = 22     # standard input field height
 _BTN_H = 24       # button height
 _ROW = 28         # vertical rhythm per row
+_CHECK_H = 20     # checkbox row height
+_CHECK_GAP = 4    # gap between checkboxes
 
 
 class VFClampDialog:
-	"""Vanilla dialog for selecting named instances and generating a restricted VF."""
+	"""Vanilla FloatingWindow dialog for selecting named instances and generating a restricted VF."""
 
 	def __init__(self):
-		"""Initialise state; the window is not shown until show() is called."""
+		"""Initialise dialog state. Window is not shown until show() is called."""
 		self._font_path = None
-		self._instance_names = []  # ordered list from fvar
-		self._checks = []          # vanilla.CheckBox widgets, one per instance
-
-		# Start y position (top-down inside vanilla's coordinate system = bottom-up in AppKit,
-		# so vanilla auto-sizes; we track a running y for *posSize* top-offsets)
+		self._instance_names = []   # ordered list from fvar
+		self._checks = []           # vanilla.CheckBox widgets, one per instance
+		self._name_overridden = False
 		self._build_window()
 
 	# ------------------------------------------------------------------
@@ -186,16 +299,16 @@ class VFClampDialog:
 
 	def _build_window(self):
 		"""Build the full dialog layout with vanilla widgets."""
-		# We calculate a generous fixed height; the window is not resizable.
-		# We'll add instance checkboxes dynamically after font load.
 		w = _W
-		h = 560  # initial estimate; resized after font load
+		# Calculate initial height for static sections only
+		# (instance section expands when a font is loaded)
+		h = self._compute_window_height(0)
 
 		self.w = vanilla.FloatingWindow(
 			(w, h),
 			'vf-clamp — Generate Restricted VFs',
 			minSize=(w, 300),
-			maxSize=(w, 900),
+			maxSize=(w, 1000),
 		)
 		win = self.w
 
@@ -217,28 +330,36 @@ class VFClampDialog:
 		)
 		y += _ROW + 4
 
-		# Divider (drawn as a Box with height=1)
 		win.divider1 = vanilla.HorizontalLine((_PAD, y, -_PAD, 1))
 		y += 12
 
-		# --- Instance list (populated after font load) ---
+		# --- Named Instances (scroll area) ---
 		win.instanceLabel = vanilla.TextBox((_PAD, y, -_PAD, _LABEL_H), 'Named Instances:')
 		y += _LABEL_H + 6
 
-		# Placeholder message shown before a font is loaded
+		# Placeholder shown before a font is loaded
 		win.instancePlaceholder = vanilla.TextBox(
-			(_PAD, y, -_PAD, _LABEL_H * 2),
+			(_PAD, y, -_PAD, _LABEL_H),
 			'Open a variable font to see its named instances.',
 			sizeStyle='small',
 		)
-		# Store start-y for dynamic checkbox area
-		self._checks_top_y = y
-		self._checks_area_height = 0  # updated after font load
-		y += _LABEL_H * 2 + 8
+		# Scrollable group that holds the dynamic checkboxes
+		self._scroll_top_y = y
+		self._scroll_height = _LABEL_H  # updated after font load
+
+		win.instanceScroll = vanilla.ScrollView(
+			(_PAD, y, -_PAD, _LABEL_H),
+			hasHorizontalScroller=False,
+			hasVerticalScroller=True,
+			autohidesScrollers=True,
+		)
+		win.instanceScroll.show(False)  # hidden until font loaded
+
+		y += _LABEL_H + 8
+		self._post_scroll_y = y  # everything below is repositioned after font load
 
 		win.divider2 = vanilla.HorizontalLine((_PAD, y, -_PAD, 1))
 		y += 12
-		self._controls_top_y = y  # everything below moves down after font load
 
 		# --- Output Name ---
 		win.nameLabel = vanilla.TextBox((_PAD, y, -_PAD, _LABEL_H), 'Output Name:')
@@ -278,7 +399,7 @@ class VFClampDialog:
 		win.divider3 = vanilla.HorizontalLine((_PAD, y, -_PAD, 1))
 		y += 12
 
-		# --- Generate button ---
+		# --- Generate button + status label ---
 		win.generateButton = vanilla.Button(
 			(-_PAD - 120, y - 1, -_PAD, _BTN_H),
 			'Generate',
@@ -286,17 +407,25 @@ class VFClampDialog:
 		)
 		win.generateButton.enable(False)
 
-		# --- Status label ---
 		win.statusLabel = vanilla.TextBox(
 			(_PAD, y + 4, -140, _LABEL_H),
 			'',
 			sizeStyle='small',
 		)
-		y += _ROW
+		y += _ROW + _PAD
 
-		# Resize window to fit content
-		self._static_bottom_height = y + _PAD
-		win.resize(w, self._static_bottom_height)
+		self._static_sections_height = y
+
+	def _compute_window_height(self, n_instances):
+		"""Return total window height for n_instances checkboxes in the scroll area."""
+		# Static top section: font label + field + divider + instance label
+		top = _PAD + _LABEL_H + 4 + _ROW + 4 + 12 + _LABEL_H + 6
+		# Scroll area height: at least 1 row, capped at 8 visible rows
+		visible_rows = max(1, min(n_instances, 8))
+		scroll_h = visible_rows * (_CHECK_H + _CHECK_GAP) + 8
+		# Static bottom sections: divider + name + format + folder + generate
+		bottom = 8 + 12 + _LABEL_H + 4 + _FIELD_H + 4 + _ROW + 4 + _ROW + 4 + _LABEL_H + 4 + _FIELD_H + 8 + 12 + _ROW + _PAD
+		return top + scroll_h + bottom
 
 	# ------------------------------------------------------------------
 	# Event handlers
@@ -329,11 +458,11 @@ class VFClampDialog:
 			self.w.folderField.set(panel.URL().path())
 
 	def _on_name_edited(self, sender):
-		"""Track whether the user has manually overridden the auto-computed output name."""
+		"""Track whether the user has manually set the output name."""
 		self._name_overridden = bool(self.w.nameField.get().strip())
 
 	def _on_check_toggled(self, sender):
-		"""Update output name and Generate button state whenever an instance is toggled."""
+		"""Update output name and Generate button state when an instance is toggled."""
 		self._refresh_name()
 		self._refresh_generate_button()
 
@@ -349,7 +478,10 @@ class VFClampDialog:
 			self._set_status('Enter an output name.', error=True)
 			return
 
-		fmt = self.w.formatPopup.getItem()
+		# Resolve format string from PopUpButton (get() returns an index)
+		fmt_items = self.w.formatPopup.getItems()
+		fmt_index = self.w.formatPopup.get()
+		fmt = fmt_items[fmt_index] if fmt_items else 'TTF'
 		ext = extension_for_format(fmt)
 
 		# Determine output folder
@@ -357,7 +489,7 @@ class VFClampDialog:
 		if not folder:
 			folder = os.path.dirname(self._font_path) if self._font_path else os.path.expanduser('~/Desktop')
 
-		# Build output filename: sanitize family_name for filesystem
+		# Sanitise family name for use as a filename (no path separators)
 		safe_name = re.sub(r'[/\\:*?"<>|]', '-', family_name)
 		output_path = os.path.join(folder, safe_name + ext)
 
@@ -377,8 +509,14 @@ class VFClampDialog:
 		self._set_status('Loading…')
 		try:
 			names = get_instance_names(path)
-		except Exception as e:
+		except ValueError as e:
+			self._set_status(f'{e}', error=True)
+			return
+		except OSError as e:
 			self._set_status(f'Error loading font: {e}', error=True)
+			return
+		except Exception as e:
+			self._set_status(f'Unexpected error: {e}', error=True)
 			return
 
 		self._font_path = path
@@ -387,95 +525,109 @@ class VFClampDialog:
 		self._set_status('')
 		self._populate_instance_checks(names)
 
-		# Auto-fill output folder to font's directory
+		# Auto-fill output folder to font's directory (if not already chosen)
 		if not self.w.folderField.get().strip():
 			self.w.folderField.set(os.path.dirname(path))
 
+		self._name_overridden = False
 		self._refresh_name()
 		self._refresh_generate_button()
 
 	def _populate_instance_checks(self, names):
-		"""Dynamically add one CheckBox per named instance, replacing the placeholder."""
-		# Remove old checkboxes if any
-		for cb in self._checks:
-			try:
-				delattr(self.w, cb._name_attr)
-			except Exception:
-				pass
+		"""Build one CheckBox per named instance inside a scrollable Group.
+
+		Replaces any previous set of checkboxes entirely.
+		"""
+		# Hide placeholder text
+		self.w.instancePlaceholder.show(False)
+
+		n = len(names)
+		check_row = _CHECK_H + _CHECK_GAP
+
+		# Total height of the inner group (all checkboxes stacked)
+		inner_h = n * check_row + _CHECK_GAP
+
+		# Visible scroll area height: show up to 8 rows, minimum 1
+		visible_rows = max(1, min(n, 8))
+		scroll_h = visible_rows * check_row + _CHECK_GAP
+
+		# Build the inner Group that holds all checkboxes
+		inner_group = vanilla.Group((0, 0, -0, inner_h))
 		self._checks = []
-
-		# Hide placeholder
-		self.w.instancePlaceholder.set('')
-
-		check_h = _LABEL_H + 2
-		area_height = len(names) * (check_h + 4) + 8
-
 		for idx, name in enumerate(names):
-			y = self._checks_top_y + idx * (check_h + 4)
-			attr_name = f'_check_{idx}'
+			y = _CHECK_GAP + idx * check_row
+			attr = f'_cb_{idx}'
 			cb = vanilla.CheckBox(
-				(_PAD + 8, y, -_PAD, check_h),
+				(8, y, -8, _CHECK_H),
 				name,
 				value=False,
 				callback=self._on_check_toggled,
 			)
-			# Store the attribute name so we can remove it later
-			cb._name_attr = attr_name
-			setattr(self.w, attr_name, cb)
-			self._checks.append(cb)
+			setattr(inner_group, attr, cb)
+			self._checks.append((attr, inner_group))
 
-		self._checks_area_height = area_height
+		# Store reference to inner group so we can read checkboxes later
+		self._inner_group = inner_group
 
-		# Resize window to accommodate instance list
-		new_h = self._checks_top_y + area_height + (self._static_bottom_height - self._checks_top_y - _LABEL_H * 2 - 8)
-		self.w.resize(_W, max(400, new_h))
+		# Resize and show the scroll view
+		self.w.instanceScroll.setPosSize((_PAD, self._scroll_top_y, -_PAD, scroll_h))
+		self.w.instanceScroll.setDocumentView_(inner_group._nsObject)
+		self.w.instanceScroll.show(True)
+
+		# Resize window to fit the new scroll area
+		new_h = self._compute_window_height(n)
+		self.w.resize(_W, new_h)
 
 	# ------------------------------------------------------------------
 	# Helpers
 	# ------------------------------------------------------------------
 
 	def _selected_instance_names(self):
-		"""Return a list of instance name strings whose checkbox is ticked."""
+		"""Return names of instances whose checkbox is ticked."""
+		if not hasattr(self, '_inner_group'):
+			return []
 		selected = []
 		for idx, name in enumerate(self._instance_names):
-			cb = getattr(self.w, f'_check_{idx}', None)
+			attr = f'_cb_{idx}'
+			cb = getattr(self._inner_group, attr, None)
 			if cb and cb.get():
 				selected.append(name)
 		return selected
 
 	def _refresh_name(self):
-		"""Auto-compute output name from first and last selected instance (unless overridden)."""
-		if getattr(self, '_name_overridden', False):
+		"""Auto-compute output name from first + last selected instance (unless overridden)."""
+		if self._name_overridden:
 			return
 		selected = self._selected_instance_names()
 		if not selected:
 			self.w.nameField.set('')
 			return
-		# Derive base family name by stripping the first instance style from the font basename
+
+		# Derive base family name by stripping the instance style token from the file basename
 		base = os.path.splitext(os.path.basename(self._font_path))[0] if self._font_path else ''
-		# Use compact_name on the style tokens, prepend the shared base
 		first_style = selected[0]
 		last_style = selected[-1]
 		style_compact = compact_name(first_style, last_style)
-		# Try to build "FamilyName StyleCompact" by stripping the first_style suffix from base
-		if base.endswith(first_style.replace(' ', '')):
-			family_base = base[: -len(first_style.replace(' ', ''))].rstrip('-_')
+
+		# Attempt to strip the first_style suffix from the file basename
+		style_slug = first_style.replace(' ', '')
+		if base.endswith(style_slug):
+			family_base = base[: -len(style_slug)].rstrip('-_')
 			computed = f'{family_base} {style_compact}' if family_base else style_compact
 		else:
 			computed = f'{base} {style_compact}' if base else style_compact
+
 		self.w.nameField.set(computed.strip())
 
 	def _refresh_generate_button(self):
-		"""Enable the Generate button only when a font is loaded and ≥1 instance is selected."""
+		"""Enable Generate only when a font is loaded and at least one instance is selected."""
 		enabled = bool(self._font_path and self._selected_instance_names())
 		self.w.generateButton.enable(enabled)
 
 	def _set_status(self, message, error=False):
-		"""Update the status label; errors are prefixed with '⚠ '."""
-		if error:
-			self.w.statusLabel.set(f'⚠️  {message}')
-		else:
-			self.w.statusLabel.set(message)
+		"""Update the status label. Errors are prefixed with a warning symbol."""
+		text = f'⚠️  {message}' if error else message
+		self.w.statusLabel.set(text)
 
 	# ------------------------------------------------------------------
 	# Public
@@ -483,5 +635,4 @@ class VFClampDialog:
 
 	def show(self):
 		"""Bring the dialog window to the front."""
-		self._name_overridden = False
 		self.w.open()

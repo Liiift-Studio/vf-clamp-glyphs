@@ -22,8 +22,5 @@ build/
 *.swp
 *.swo
 
-# Test font output
-*.ttf
-*.otf
-*.woff
-*.woff2
+# Test/generated font output (do not commit generated restricted VFs)
+test-output/
