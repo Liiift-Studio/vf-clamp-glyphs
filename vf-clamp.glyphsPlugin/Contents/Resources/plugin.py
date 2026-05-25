@@ -3,6 +3,7 @@
 import objc
 import os
 import re
+import threading
 import warnings
 
 from GlyphsApp import *
@@ -117,6 +118,9 @@ def patch_name_table(font, family_name):
 
 def compact_name(first, last):
 	"""Strip shared word prefix/suffix and join differing parts with a hyphen.
+
+	Canonical TypeScript implementation: @liiift-studio/vf-clamp src/core/utils.ts compactName()
+	Duplicate also exists in vf-clamp-robofont controller.py and vf-clamp-vscode panel.ts webview.
 
 	Examples:
 	  'Encode Sans Light' + 'Encode Sans Bold'  → 'Encode Sans Light-Bold'
@@ -480,7 +484,7 @@ class VFClampDialog:
 		self._refresh_generate_button()
 
 	def _on_generate(self, sender):
-		"""Read UI values and call produce_restricted_vf; report success or failure."""
+		"""Read UI state on main thread, then run produce_restricted_vf on a background thread."""
 		selected = self._selected_instance_names()
 		if not selected:
 			self._set_status('Select at least one named instance.', error=True)
@@ -506,12 +510,26 @@ class VFClampDialog:
 		safe_name = re.sub(r'[/\\:*?"<>|]', '-', family_name)
 		output_path = os.path.join(folder, safe_name + ext)
 
+		# Capture before entering thread — thread must not read self.w.*
+		font_path = self._font_path
+
+		# Update UI synchronously before handing off
 		self._set_status('Generating…')
-		try:
-			produce_restricted_vf(self._font_path, selected, family_name, output_path)
-			self._set_status(f'Saved: {output_path}')
-		except Exception as e:
-			self._set_status(f'Error: {e}', error=True)
+		self.w.generateButton.enable(False)
+
+		def _run():
+			"""Blocking font generation — runs off the AppKit main thread."""
+			try:
+				produce_restricted_vf(font_path, selected, family_name, output_path)
+				msg = f'Saved: {output_path}'
+				objc.callOnMainThread(lambda: self._set_status(msg))
+			except Exception as e:
+				err_msg = f'Error: {e}'
+				objc.callOnMainThread(lambda: self._set_status(err_msg, error=True))
+			finally:
+				objc.callOnMainThread(lambda: self.w.generateButton.enable(True))
+
+		threading.Thread(target=_run, daemon=True).start()
 
 	# ------------------------------------------------------------------
 	# Font loading
