@@ -1,0 +1,4 @@
+fonttools>=4.34.0
+brotli>=1.0.9
+pytest>=7.0
+pytest-cov>=4.0

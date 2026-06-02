@@ -2,15 +2,27 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.liiift-studio.vf-clamp</string>
+	<string>studio.liiift.vfclamp</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>vf-clamp</string>
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
+	<string>4</string>
+	<key>GlyphsRequiresAppVersion</key>
 	<string>3</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>10.13</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© Liiift Studio. MIT License.</string>
 	<key>NSPrincipalClass</key>
-	<string>VFClampPlugin</string>
+	<string>LiiiftVFClampPlugin</string>
 </dict>
 </plist>

@@ -1,0 +1,28 @@
+[project]
+name = "vf-clamp-glyphs"
+version = "1.0.0"
+description = "Glyphs.app plugin for generating restricted variable fonts (vf-clamp)"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+authors = [{ name = "Liiift Studio", email = "hello@liiift.studio" }]
+
+# Runtime dependencies for the core helpers (the Glyphs UI shell imports
+# AppKit/objc/GlyphsApp which are only present inside Glyphs.app).
+dependencies = [
+	"fonttools >= 4.34.0",
+]
+
+[project.optional-dependencies]
+woff2 = ["brotli >= 1.0.9"]
+test = [
+	"pytest >= 7.0",
+	"pytest-cov >= 4.0",
+	"fonttools >= 4.34.0",
+	"brotli >= 1.0.9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["vf-clamp.glyphsPlugin/Contents/Resources"]
+addopts = "-ra -q --strict-markers"

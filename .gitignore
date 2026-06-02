@@ -24,3 +24,8 @@ build/
 
 # Test/generated font output (do not commit generated restricted VFs)
 test-output/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
