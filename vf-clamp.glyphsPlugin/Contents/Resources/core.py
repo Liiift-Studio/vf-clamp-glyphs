@@ -927,6 +927,36 @@ from gsfont_core import (  # noqa: F401
 )
 
 
+# ---------------------------------------------------------------------------
+# Naming-alignment deprecation aliases (issue #46)
+#
+# The file-source (fontTools) public API uses verb-first names without a
+# subsystem prefix (``get_instance_names``, ``compute_hull``); the GSFont-
+# source API uses a ``gsfont_`` prefix on the same verbs
+# (``gsfont_instance_names``, ``compute_gsfont_hull``). The two were
+# introduced at different times and the prefix-style is the canonical one for
+# the newer GSFont subsystem — a full rename across the older fontTools
+# helpers would be a public API break for downstream consumers (the npm
+# wrapper, the CLI plugin, third-party Glyphs scripts that import from
+# ``core``).
+#
+# As an intermediate step we add prefix-aligned aliases pointing at the
+# existing fontTools helpers so callers who prefer the symmetrical
+# ``<subsystem>_<verb>`` shape (e.g. ``fttools_instance_names``) can use it
+# today. The original names remain the supported public API.
+#
+# Full rename pass deferred to v2.0 to coordinate with the npm + CLI release.
+# ---------------------------------------------------------------------------
+
+# Prefix-aligned aliases for the fontTools-side helpers. Pointing at the
+# verb-first originals keeps a single source of truth; updating the original
+# automatically updates the alias.
+fttools_instance_names = get_instance_names
+fttools_compute_hull = compute_hull
+fttools_axis_hull_from_instances = get_axis_hull_from_instances
+fttools_produce_restricted_vf = produce_restricted_vf
+
+
 # The capability flag and the INSTANCETYPEVARIABLE sentinel live on
 # ``gsfont_core`` but several tests monkeypatch them on ``core``. To keep the
 # legacy ``monkeypatch.setattr(core, '_GLYPHS_AVAILABLE', …)`` pattern working

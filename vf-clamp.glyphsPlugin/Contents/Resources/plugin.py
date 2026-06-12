@@ -5,6 +5,8 @@ import os
 import sys
 import threading
 import traceback
+from pathlib import Path
+from typing import Any, List, Optional
 
 import objc
 from PyObjCTools import AppHelper
@@ -341,6 +343,14 @@ class VFClampDialog:
 			callback=self._on_source_radio_changed,
 		)
 		win.sourceRadio.set(1)  # default to File; __init__ flips to Open Font if any are present
+		# Accessibility: VoiceOver should announce the source-selector role
+		# rather than reading the two radio cells as anonymous toggles.
+		try:
+			win.sourceRadio._nsObject.setAccessibilityLabel_(
+				'Font source — Open Font or File'
+			)
+		except (AttributeError, RuntimeError):
+			pass
 		y += ROW + 6
 
 		# --- Row 2: Source-specific input (file row OR gsfont popup, same Y)
@@ -486,6 +496,12 @@ class VFClampDialog:
 			placeholder='e.g. MyFont Light-Bold',
 			callback=self._on_name_edited,
 		)
+		try:
+			win.nameField._nsObject.setAccessibilityLabel_(
+				'Output family name'
+			)
+		except (AttributeError, RuntimeError):
+			pass
 		y += ROW + 4
 
 		# --- Row 7: Format ---------------------------------------------
@@ -494,6 +510,12 @@ class VFClampDialog:
 			(CONTROL_X, y, 160, FIELD_H + 2),
 			list(self.BINARY_FORMATS),
 		)
+		try:
+			win.formatPopup._nsObject.setAccessibilityLabel_(
+				'Output font format'
+			)
+		except (AttributeError, RuntimeError):
+			pass
 		y += ROW + 4
 
 		# --- Row 8: Output Folder --------------------------------------
@@ -508,6 +530,12 @@ class VFClampDialog:
 			'Choose…',
 			callback=self._on_choose_folder,
 		)
+		try:
+			win.folderField._nsObject.setAccessibilityLabel_(
+				'Output folder path'
+			)
+		except (AttributeError, RuntimeError):
+			pass
 		y += ROW + 8
 
 		# --- Divider ----------------------------------------------------
@@ -533,6 +561,14 @@ class VFClampDialog:
 			win.generateButton._nsObject.setKeyEquivalent_('\r')
 		except Exception:
 			pass
+		# Accessibility: VoiceOver should announce the verbose action label
+		# for the primary button (Return-key equivalent is the default).
+		try:
+			win.generateButton._nsObject.setAccessibilityLabel_(
+				'Generate the restricted variable font'
+			)
+		except (AttributeError, RuntimeError):
+			pass
 
 		win.cancelButton = vanilla.Button(
 			(-PAD - GEN_W - GAP - CAN_W, y, CAN_W, BTN_H),
@@ -543,6 +579,12 @@ class VFClampDialog:
 		try:
 			win.cancelButton._nsObject.setKeyEquivalent_('\x1b')
 		except Exception:
+			pass
+		try:
+			win.cancelButton._nsObject.setAccessibilityLabel_(
+				'Cancel and close the dialog'
+			)
+		except (AttributeError, RuntimeError):
 			pass
 
 		win.revealButton = vanilla.Button(
@@ -582,6 +624,19 @@ class VFClampDialog:
 			sizeStyle='small',
 			selectable=True,
 		)
+		# Accessibility: spinner + status text combine into an aria-live-like
+		# announcement region. VoiceOver should treat status as a live region
+		# so Generating… / Saved: / Error: messages are spoken automatically.
+		try:
+			win.statusLabel._nsObject.setAccessibilityLabel_('Status')
+		except (AttributeError, RuntimeError):
+			pass
+		try:
+			win.spinner._nsObject.setAccessibilityLabel_(
+				'Working — generating font'
+			)
+		except (AttributeError, RuntimeError):
+			pass
 		y += BTN_H + PAD
 		self._static_sections_height = y
 
@@ -654,7 +709,7 @@ class VFClampDialog:
 	# ------------------------------------------------------------------
 
 	@objc.python_method
-	def _refresh_gsfont_popup(self):
+	def _refresh_gsfont_popup(self) -> None:
 		"""Repopulate the open-font popup from the current Glyphs.fonts list."""
 		fonts = list_open_glyphs_fonts() if is_glyphs_app_available() else []
 		self._gsfont_options = fonts
@@ -671,7 +726,7 @@ class VFClampDialog:
 		except Exception:
 			pass
 
-	def _on_gsfont_chosen(self, sender):
+	def _on_gsfont_chosen(self, sender: Any) -> None:
 		"""Handle a user selection from the open-Glyphs-font popup."""
 		idx = self.w.gsfontPopup.get()
 		# Index 0 is the sentinel "(no open Glyphs fonts)" / "—" entry.
@@ -681,7 +736,7 @@ class VFClampDialog:
 		self._load_gsfont(gsfont)
 
 	@objc.python_method
-	def _set_source_mode_ui(self, mode):
+	def _set_source_mode_ui(self, mode: str) -> None:
 		"""Show the file row OR the gsfont popup, depending on ``mode``.
 
 		Both widget groups occupy the same Y position; only one is visible.
@@ -712,7 +767,7 @@ class VFClampDialog:
 		self._refresh_format_popup()
 
 	@objc.python_method
-	def _transition_source_mode(self, mode, *, clear_inactive=True, reset_folder=False):
+	def _transition_source_mode(self, mode: str, *, clear_inactive: bool = True, reset_folder: bool = False) -> None:
 		"""Switch ``_source_mode`` to ``mode`` and clear stale cross-source state.
 
 		Centralised transition (issue #44) — every place that needs to change
@@ -809,7 +864,7 @@ class VFClampDialog:
 			pass
 
 	@objc.python_method
-	def _auto_select_frontmost_gsfont(self):
+	def _auto_select_frontmost_gsfont(self) -> None:
 		"""Default to the frontmost open Glyphs font when the dialog opens.
 
 		When a font is open in Glyphs, the canonical entry point is "clamp this
@@ -846,7 +901,7 @@ class VFClampDialog:
 		self._load_gsfont(target)
 
 	@objc.python_method
-	def _refresh_format_popup(self):
+	def _refresh_format_popup(self) -> None:
 		"""Adjust the Format popup items to match the active source mode."""
 		if self._source_mode == self.SOURCE_GSFONT:
 			items = list(self.GSFONT_FORMATS)
@@ -871,7 +926,7 @@ class VFClampDialog:
 			pass
 
 	@objc.python_method
-	def _load_gsfont(self, gsfont):
+	def _load_gsfont(self, gsfont: Any) -> None:
 		"""Switch the dialog to GSFont source mode and populate instance checkboxes."""
 		self._set_status('Loading open Glyphs font…')
 		try:
@@ -1092,18 +1147,24 @@ class VFClampDialog:
 			)
 
 	@objc.python_method
-	def _default_output_folder(self):
-		"""Return a sensible default output folder when the user has not chosen one."""
+	def _default_output_folder(self) -> str:
+		"""Return a sensible default output folder when the user has not chosen one.
+
+		Uses ``pathlib.Path`` for the gsfont- and file-source folder derivations
+		(issue #79 partial migration). The return type is still ``str`` because
+		downstream consumers (vanilla EditText, safe_output_path) all expect a
+		plain string path.
+		"""
 		if self._source_mode == self.SOURCE_GSFONT and self._gsfont is not None:
 			try:
 				fp = self._gsfont.filepath
 			except Exception:
 				fp = None
 			if fp:
-				return os.path.dirname(fp)
+				return str(Path(fp).parent)
 		if self._font_path:
-			return os.path.dirname(self._font_path)
-		return os.path.expanduser('~/Desktop')
+			return str(Path(self._font_path).parent)
+		return str(Path.home() / 'Desktop')
 
 	@objc.python_method
 	def _begin_generate_ui(self):
@@ -1165,8 +1226,9 @@ class VFClampDialog:
 					# no longer wants. Quiet failure is intentional — the user
 					# already saw the Cancel they asked for.
 					try:
-						if os.path.exists(output_path):
-							os.unlink(output_path)
+						out_path_obj = Path(output_path)
+						if out_path_obj.exists():
+							out_path_obj.unlink()
 					except OSError:
 						pass
 					return
@@ -1175,7 +1237,7 @@ class VFClampDialog:
 		threading.Thread(target=_run, daemon=True).start()
 
 	@objc.python_method
-	def _generate_from_gsfont(self, selected, family_name, fmt, output_path):
+	def _generate_from_gsfont(self, selected: List[str], family_name: str, fmt: str, output_path: str) -> None:
 		"""Open-font-source path — runs on the main thread (Glyphs APIs require it).
 
 		For ``.glyphs`` output we just clamp + save. For binary outputs we route
@@ -1207,7 +1269,7 @@ class VFClampDialog:
 		)
 
 	@objc.python_method
-	def _run_gsfont_generate(self, gsfont, selected, family_name, fmt, output_path):
+	def _run_gsfont_generate(self, gsfont: Any, selected: List[str], family_name: str, fmt: str, output_path: str) -> None:
 		"""Actually do the GSFont clamp + save/export. Deferred onto the runloop."""
 		if self._cancelled or not self._alive():
 			return
@@ -1337,7 +1399,8 @@ class VFClampDialog:
 		self._populate_instance_checks(names)
 
 		if not self.w.folderField.get().strip():
-			self.w.folderField.set(os.path.dirname(path))
+			# pathlib for the file-source folder default (issue #79 partial).
+			self.w.folderField.set(str(Path(path).parent))
 
 		self._name_overridden = False
 		self._refresh_name()
@@ -1405,6 +1468,17 @@ class VFClampDialog:
 			# attribute name is local to this build only — never read elsewhere.
 			setattr(inner_group, f'_cb_{idx}', cb)
 			self._checks.append(cb)
+
+		# Accessibility: VoiceOver reads checkbox labels but the cell is wrapped
+		# in a custom NSScrollView document view, so the row group itself benefits
+		# from an explicit role description.
+		for cb, name in zip(self._checks, names):
+			try:
+				cb._nsObject.setAccessibilityLabel_(
+					f'Include {name} instance'
+				)
+			except (AttributeError, RuntimeError):
+				pass
 
 		self._inner_group = inner_group
 

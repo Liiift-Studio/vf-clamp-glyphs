@@ -13,6 +13,8 @@ import copy
 import os
 import shutil
 import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 # Re-use shared filename/format helpers from core so behaviour matches the
 # fontTools-driven binary path exactly (no drift between the two writers).
@@ -41,22 +43,22 @@ except ImportError as _gerr:
 	PLAIN = WOFF = WOFF2 = None  # type: ignore
 
 
-def is_glyphs_app_available():
+def is_glyphs_app_available() -> bool:
 	"""Return True when running inside Glyphs.app with the GlyphsApp Python API."""
 	return _GLYPHS_AVAILABLE
 
 
-def glyphs_import_error():
+def glyphs_import_error() -> Optional[str]:
 	"""Return the GlyphsApp import-error string, or None when importable."""
 	return _GLYPHS_IMPORT_ERROR
 
 
-def _is_variable_instance(inst):
+def _is_variable_instance(inst: Any) -> bool:
 	"""Return True for a Variable Font Setting instance (not a static named instance)."""
 	return getattr(inst, 'type', 0) == INSTANCETYPEVARIABLE
 
 
-def list_open_glyphs_fonts():
+def list_open_glyphs_fonts() -> List[Any]:
 	"""Return the list of open ``GSFont`` documents, or [] when Glyphs is unavailable."""
 	if not _GLYPHS_AVAILABLE:
 		return []
@@ -66,7 +68,7 @@ def list_open_glyphs_fonts():
 		return []
 
 
-def gsfont_label(gsfont):
+def gsfont_label(gsfont: Any) -> str:
 	"""Return a short, human-readable label for a GSFont (used in PopUp lists)."""
 	family = getattr(gsfont, 'familyName', '') or 'Untitled'
 	doc_path = ''
@@ -76,14 +78,14 @@ def gsfont_label(gsfont):
 		# Glyphs may not have a filepath set, or filesystem access may fail.
 		pass
 	if doc_path:
-		base = os.path.basename(doc_path)
+		base = Path(doc_path).name
 		return f'{family}  ({base})'
 	return family
 
 
-def gsfont_instance_names(gsfont):
+def gsfont_instance_names(gsfont: Any) -> List[str]:
 	"""Return ordered names of *static* named instances in a GSFont (skips Variable Font Settings)."""
-	out = []
+	out: List[str] = []
 	for inst in gsfont.instances:
 		if _is_variable_instance(inst):
 			continue
@@ -93,7 +95,7 @@ def gsfont_instance_names(gsfont):
 	return out
 
 
-def compute_gsfont_hull(gsfont, selected_names):
+def compute_gsfont_hull(gsfont: Any, selected_names: List[str]) -> Dict[str, Tuple[float, float]]:
 	"""Compute the per-axis hull from selected GSInstance coordinates.
 
 	Returns ``dict[axis_tag, (lo, hi)]`` in design units. Axes that are absent
@@ -119,7 +121,7 @@ def compute_gsfont_hull(gsfont, selected_names):
 	return {tag: (lo, hi) for tag, (lo, hi) in hull.items()}
 
 
-def _deepcopy_gsfont(gsfont):
+def _deepcopy_gsfont(gsfont: Any) -> Any:
 	"""Return a true deep clone of ``gsfont`` that does not share state with the source.
 
 	Glyphs 3's ``GSFont.copy()`` inherits NSObject's NSCopying, which is a
@@ -138,16 +140,19 @@ def _deepcopy_gsfont(gsfont):
 		return copy.deepcopy(gsfont)
 	# Try the save-and-reopen round-trip first. This is what Glyphs' own
 	# scripting cookbook recommends for a true deep clone.
-	tmp_dir = tempfile.mkdtemp(prefix='vfclamp-clone-')
-	tmp_path = os.path.join(tmp_dir, 'clone.glyphs')
+	tmp_dir = Path(tempfile.mkdtemp(prefix='vfclamp-clone-'))
+	tmp_path = tmp_dir / 'clone.glyphs'
 	try:
 		# makeCopy=True writes a new file without changing the source's
 		# tracked filepath or flipping its dirty flag.
-		gsfont.save(path=tmp_path, formatVersion=3, makeCopy=True)
+		# str() coerces for the Glyphs API which expects an NSString-bridgeable
+		# value (pathlib.Path passes through PyObjC fine, but explicit str is
+		# robust across older Glyphs builds).
+		gsfont.save(path=str(tmp_path), formatVersion=3, makeCopy=True)
 		try:
-			reopened = Glyphs.open(tmp_path, showInterface=False)
+			reopened = Glyphs.open(str(tmp_path), showInterface=False)
 		except TypeError:
-			reopened = Glyphs.open(tmp_path)
+			reopened = Glyphs.open(str(tmp_path))
 		if reopened is None:
 			raise RuntimeError('Could not reopen temp clone of GSFont')
 		return reopened
@@ -161,7 +166,7 @@ def _deepcopy_gsfont(gsfont):
 			pass
 
 
-def clamp_gsfont(gsfont, selected_instance_names, output_family_name):
+def clamp_gsfont(gsfont: Any, selected_instance_names: List[str], output_family_name: str) -> Any:
 	"""Return a clamped *copy* of ``gsfont``.
 
 	The source font is never mutated. The returned ``GSFont`` has:
@@ -261,7 +266,7 @@ def clamp_gsfont(gsfont, selected_instance_names, output_family_name):
 	return new_font
 
 
-def save_gsfont_to_glyphs(gsfont, output_path, format_version=None):
+def save_gsfont_to_glyphs(gsfont: Any, output_path: str, format_version: Optional[int] = None) -> None:
 	"""Save a (clamped) GSFont to a ``.glyphs`` file without affecting the open document set.
 
 	When ``format_version`` is None the output inherits the source font's own
@@ -276,7 +281,7 @@ def save_gsfont_to_glyphs(gsfont, output_path, format_version=None):
 	gsfont.save(path=output_path, formatVersion=format_version, makeCopy=True)
 
 
-def _container_for_format(fmt):
+def _container_for_format(fmt: str) -> Any:
 	"""Map a 'TTF'/'OTF'/'WOFF'/'WOFF2' string to a Glyphs export container constant.
 
 	The symbolic container key comes from the central :mod:`formats` registry
@@ -293,7 +298,7 @@ def _container_for_format(fmt):
 	return PLAIN  # PLAIN is the default for TTF/OTF and unknown formats
 
 
-def _outline_format_for(fmt):
+def _outline_format_for(fmt: str) -> Any:
 	"""Map a UI format string to the outline format Glyphs.generate() expects.
 
 	Resolves through the :mod:`formats` registry — adding a new format only
@@ -302,7 +307,7 @@ def _outline_format_for(fmt):
 	return _formats.outline_for(fmt)
 
 
-def export_gsfont_binary_via_glyphs(clamped_font, output_path, fmt):
+def export_gsfont_binary_via_glyphs(clamped_font: Any, output_path: str, fmt: str) -> None:
 	"""Export a clamped GSFont as a Variable Font binary using Glyphs' own compiler.
 
 	Strategy: save the clamped font to a temp ``.glyphs`` file, open it
@@ -318,26 +323,31 @@ def export_gsfont_binary_via_glyphs(clamped_font, output_path, fmt):
 
 	container = _container_for_format(fmt)
 	outline_fmt = _outline_format_for(fmt)
-	output_dir = os.path.dirname(output_path) or '.'
-	os.makedirs(output_dir, exist_ok=True)
+	# pathlib path arithmetic on output_path: parent for the destination
+	# directory; '.' fallback when output_path is a bare filename without dirs.
+	output_path_obj = Path(output_path)
+	output_dir = output_path_obj.parent if str(output_path_obj.parent) else Path('.')
+	output_dir.mkdir(parents=True, exist_ok=True)
 
-	tmp_dir = tempfile.mkdtemp(prefix='vfclamp-')
-	tmp_glyphs_path = os.path.join(tmp_dir, 'vfclamp-source.glyphs')
-	export_dir = os.path.join(tmp_dir, 'export')
-	os.makedirs(export_dir, exist_ok=True)
+	tmp_dir = Path(tempfile.mkdtemp(prefix='vfclamp-'))
+	tmp_glyphs_path = tmp_dir / 'vfclamp-source.glyphs'
+	export_dir = tmp_dir / 'export'
+	export_dir.mkdir(parents=True, exist_ok=True)
 
 	temp_doc = None
 	try:
-		save_gsfont_to_glyphs(clamped_font, tmp_glyphs_path)
+		# str() coerces Path → str for the Glyphs API which expects an
+		# NSString-bridgeable value across all Glyphs versions.
+		save_gsfont_to_glyphs(clamped_font, str(tmp_glyphs_path))
 		# Open headlessly when supported (Glyphs 3.2+). On older builds that
 		# do not recognise the ``showInterface`` kwarg, Python raises TypeError;
 		# PyObjC may also raise NSInvalidArgumentException via ValueError.
 		# When we fall back to a visible open, we mark the doc for closure in
 		# the finally block so we don't strand a phantom temp window.
 		try:
-			temp_doc = Glyphs.open(tmp_glyphs_path, showInterface=False)
+			temp_doc = Glyphs.open(str(tmp_glyphs_path), showInterface=False)
 		except (TypeError, ValueError):
-			temp_doc = Glyphs.open(tmp_glyphs_path)
+			temp_doc = Glyphs.open(str(tmp_glyphs_path))
 		if temp_doc is None:
 			raise RuntimeError(
 				'Glyphs.open() returned no document for temp source file. '
@@ -356,7 +366,7 @@ def export_gsfont_binary_via_glyphs(clamped_font, output_path, fmt):
 		# where ``containers`` was not yet a recognised parameter.
 		generate_kwargs = dict(
 			format=outline_fmt,
-			fontPath=export_dir,
+			fontPath=str(export_dir),
 			autoHint=True,
 			useProductionNames=True,
 		)
@@ -385,24 +395,24 @@ def export_gsfont_binary_via_glyphs(clamped_font, output_path, fmt):
 		# masquerade as the output.
 		expected_ext = extension_for_format(fmt).lower()
 		generated = [
-			os.path.join(export_dir, name)
-			for name in os.listdir(export_dir)
-			if not name.startswith('.') and name.lower().endswith(expected_ext)
+			p for p in export_dir.iterdir()
+			if not p.name.startswith('.') and p.name.lower().endswith(expected_ext)
 		]
 		if not generated:
 			# Fall back to any non-dotfile so the user gets a file even if the
 			# extension is unexpected (older Glyphs may write .ttf for OTF).
 			generated = [
-				os.path.join(export_dir, name)
-				for name in os.listdir(export_dir)
-				if not name.startswith('.')
+				p for p in export_dir.iterdir()
+				if not p.name.startswith('.')
 			]
 		if not generated:
 			raise RuntimeError('Glyphs export wrote no file to the temp directory')
 		# Pick the most recently modified file in case Glyphs wrote auxiliary
 		# files alongside the main output.
-		generated.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-		shutil.move(generated[0], output_path)
+		generated.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+		# shutil.move accepts Path objects on 3.9+; we still wrap in str()
+		# for compatibility with the older Python bundled in some Glyphs builds.
+		shutil.move(str(generated[0]), str(output_path_obj))
 	finally:
 		# Close the temp document without prompting to save.
 		if temp_doc is not None:
