@@ -5,6 +5,102 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-06-11
+
+This release lands the targeted fixes from a 10-engineer panel review of the
+1.1.0 GSFont source path. 50 findings were filed as GitHub issues #33–#82;
+this release closes the CRITICAL packaging/version-sync/correctness items and
+the highest-impact MAJOR UX/security items.
+
+### Added
+
+- `is_fonttools_ready`, `fonttools_import_error`, `is_glyphs_app_available`,
+  `open_font_safely` public helpers in `core.py` so `plugin.py` no longer
+  reaches into `_FONTTOOLS_*` / `_GLYPHS_AVAILABLE` underscore internals
+  (closes #45).
+- `FontParseError` (subclass of `ValueError`) so callers can distinguish
+  parse failure from I/O failure on `_safe_open_font` (closes #47, #78).
+- `_PIN_EPSILON` tolerance on `clamp_gsfont` so a single-instance pin can
+  succeed against a master whose coordinates round-tripped through floating
+  point; tailored error message when the pin point coincides with no
+  master (closes #75).
+- `_disambiguated_instance_labels` helper shared by
+  `get_axis_hull_from_instances` and `filter_fvar_instances` so duplicate
+  subfamily names match correctly (closes #71).
+- `tests/test_gsfont_helpers.py` with a `FakeGSFont` factory exercising
+  `list_open_glyphs_fonts`, `gsfont_label`, `gsfont_instance_names`,
+  `compute_gsfont_hull`, `clamp_gsfont` (deep-copy, VF-setting preservation,
+  family rewrite, empty selection, no-masters), `_container_for_format`,
+  and `_outline_format_for`. Test count: 66 → 75 (closes #37, #77).
+- CI now uploads coverage and runs `build-zip.sh` as a preflight smoke check
+  (closes #53).
+
+### Changed
+
+- `clamp_gsfont` deep-clones the source GSFont via save-to-temp-and-reopen
+  (with `copy.deepcopy` fallback in CI) so mutations never leak back into
+  the user's open document (closes #40).
+- VF Setting instances now get their `axes` trimmed when an axis collapses,
+  keeping `font.axes` structurally parallel to `instance.axes`
+  (closes #39).
+- `save_gsfont_to_glyphs` default `format_version` now inherits the source
+  font's `formatVersion` instead of hardcoding `3` (closes #76).
+- `safe_output_path` uses `os.path.realpath` so macOS symlink mismatches
+  (`/var` → `/private/var`) cannot smuggle a traversal past `commonpath`
+  (closes #48).
+- `_generate_from_gsfont` defers the heavy clamp + `Glyphs.open` work via
+  `AppHelper.callAfter` so the spinner and status label paint before the
+  main thread blocks (closes #38).
+- `_on_cancel` signals a cancellation flag to in-flight file-source
+  workers; the worker skips its success callback and unlinks any partial
+  output (closes #43).
+- `_auto_select_frontmost_gsfont` uses `is` for identity comparison
+  (GSFont `__eq__` is NSObject `-isEqual:` pointer identity; PyObjC can
+  reissue wrappers) (closes #70).
+- `showDialog_` surfaces an existing dialog instead of spawning a zombie
+  one (closes #68).
+- `axisPreview` cell now wraps lines so the multi-line attributed string
+  renders correctly instead of being clipped (closes #67).
+- WOFF2 brotli-availability check now runs for the GSFont source path too
+  (closes #57).
+- All/None/Invert bulk-select buttons get explicit
+  `setAccessibilityLabel_` (closes #82).
+- `Glyphs.open` `showInterface=False` `TypeError` fallback no longer opens
+  a visible window and steals focus (closes #50).
+- `vf_inst.generate()` return value handling now treats non-True success
+  values explicitly (closes #51).
+- `produce_restricted_vf` and `export_gsfont_binary` unlink partial output
+  on failure (closes #54).
+- Plugin menu registration no longer mixes `self.menuName` with manual
+  `NSMenuItem` injection (closes #69).
+- `_on_generate_failure` no longer double-prefixes `Error:`; raw paths are
+  scrubbed to `~`-relative form; error-state styling applied to status
+  label (closes #55).
+- Reveal button is disabled + hidden on a subsequent generate failure so
+  it cannot surface a stale prior output (closes #56).
+- Temp-directory cleanup is now structured try/finally and leaked Glyphs
+  documents are closed from `Glyphs.fonts` (closes #49).
+- Broad `except Exception` blocks narrowed across `core.py` and `plugin.py`
+  so real errors propagate instead of being swallowed (closes #78).
+
+### Fixed
+
+- Self-referential `vf-clamp.glyphsPlugin/vf-clamp.glyphsPlugin` symlink
+  removed; `build-zip.sh` aborts if one reappears (closes #33).
+- `Contents/Resources/__pycache__` stripped from the shipped bundle;
+  `build-zip.sh` strips `__pycache__/`, `*.pyc`, `*.pyo`, `*.swp`, `*~`
+  and uses `--symlinks` to prevent regression (closes #34).
+- `Info.plist`, `pyproject.toml`, and `CHANGELOG.md` versions are now
+  asserted to agree in the build preflight; ships refuse to proceed
+  otherwise (closes #35).
+- README rewritten to cover both source paths; the "important: file-only"
+  callout that contradicted 1.1.0 was removed (closes #36).
+- Stale "47 tests" and "framework-agnostic core.py" claims corrected in
+  README + Development section (closes #77).
+- `_safe_open_font` size check no longer TOCTOU-races the open; raises
+  `FontParseError` (subclass of `ValueError`) on parse failure to give
+  the right exception taxonomy (closes #47).
+
 ## [1.1.0] — 2026-06-11
 
 This release introduces a second source mode: clamping the open Glyphs.app
