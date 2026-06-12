@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.3] — 2026-06-12
+
+Final pass on the panel review backlog — closes the last 5 deferred findings
+from the 1.1.2 follow-up cycle.
+
+### Added
+
+- Public naming aliases on `core.py` so call-sites can use the documented
+  identifiers (closes deferred naming-alias finding).
+- Type hints on the new `gsfont_core.py` / `formats.py` module surfaces so
+  downstream consumers (and `mypy`) see a consistent signature across the
+  fontTools and GSFont paths (closes deferred typing finding).
+- Explicit `setAccessibilityLabel_` on the remaining controls in the dialog
+  that were missed in the 1.1.1 a11y sweep (closes deferred a11y finding).
+- `pathlib` adoption on the new GSFont path for consistency with the rest of
+  `core.py` (partial — file-source path remains on `os.path` because
+  `fontTools.ttLib.TTFont` takes raw paths) (closes deferred pathlib finding).
+
+### Changed
+
+- Sheet vs. window rationale captured in the dialog source so future
+  contributors understand why generate-progress lives in a sheet rather than
+  the main window (closes deferred Sheet-rationale finding).
+
 ## [1.1.2] — 2026-06-11
 
 Follow-up release addressing the 20 deferred findings from the 1.1.1 panel
