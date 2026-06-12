@@ -17,11 +17,19 @@ the same `compact_name` algorithm; behavioural parity is tracked in
 
 | Requirement                | Version            |
 | -------------------------- | ------------------ |
-| Glyphs.app                 | 3.x                |
-| Python (bundled by Glyphs) | 3.8+               |
+| Glyphs.app                 | 3.x (3.2+ recommended) |
+| Python                     | 3.9+               |
+| PyObjC                     | bundled by Glyphs' Python module |
 | fontTools                  | >= 4.34.0          |
-| vanilla                    | bundled by Glyphs  |
+| vanilla                    | bundled by Glyphs' Python module |
 | brotli (only for WOFF2)    | >= 1.0.9 optional  |
+
+The open-Glyphs-font source path (`Open Font` radio) relies on Glyphs 3.2+
+APIs (`Glyphs.open(showInterface=False)`, `GSInstance.generate(containers=...)`).
+The file-source path works on any Glyphs 3.x build.
+
+> [!IMPORTANT]
+> **Install the Python module from Glyphs first** — *Window → Plugin Manager → Modules → Python → Install*. This sets up the Glyphs-managed Python with `PyObjC`, `vanilla`, `fontTools`, and `brotli` all pre-installed. Without it, you'll see *"The Python installation misses the required PyObjC module"* on the first plugin load. Restart Glyphs after installing.
 
 The newer fontTools requirement comes from `instancer.AxisTriple`. Older
 versions raise `AttributeError` at startup; the plugin surfaces a clear
@@ -55,26 +63,41 @@ message in that case.
 
 ## Usage
 
-> **Important:** this plugin works on an already-exported variable font file
-> (`.ttf` or `.otf`), not on a `.glyphs` source. Export your variable font from
-> Glyphs first, then run this plugin on the exported file.
+vf-clamp supports two source modes — pick one with the **Source** radio at
+the top of the dialog:
 
-1. Open Glyphs 3 (no document needs to be open).
+- **Open Font** (default when at least one Glyphs document is open):
+  clamps the open `.glyphs` document directly. Can output to a new `.glyphs`
+  source file or to a Glyphs-native binary export (TTF/OTF/WOFF/WOFF2)
+  routed through `GSInstance.generate`.
+- **File**: clamps an already-exported `.ttf`/`.otf`/`.woff`/`.woff2`
+  variable font on disk through `fontTools.varLib.instancer`. The original
+  workflow.
+
+1. Open Glyphs 3.
 2. Go to **Script › vf-clamp › Generate Restricted VFs…**.
 3. In the dialog:
-   - **Browse…** — pick any exported `.ttf`, `.otf`, `.woff`, or `.woff2`
-     variable font from disk.
+   - **Source** — `Open Font` or `File`. The dialog auto-selects the
+     frontmost open Glyphs document on launch.
+   - **Open Font** popup (Open Font source) — pick which open Glyphs
+     document to clamp.
+   - **Browse…** (File source) — pick any exported `.ttf`, `.otf`, `.woff`,
+     or `.woff2` variable font from disk.
    - **Named Instances** — tick each instance the customer has licensed.
      Use **All / None / Invert** for bulk selection.
-   - **Axis Ranges** — preview the computed hull (e.g. `wght 300-700`).
+   - **Hull** — preview the computed axis hull (e.g. `wght 300–700`).
    - **Output Name** — auto-filled via `compact_name()` (e.g. *Encode Sans
      Light-Bold*); edit freely.
-   - **Format** — choose TTF, OTF, WOFF, or WOFF2. WOFF and WOFF2 outputs are
-     now properly compressed (not mislabelled sfnt bytes).
-   - **Output Folder** — defaults to the same folder as the source font,
-     falling back to `~/Desktop` if no font has been loaded yet.
-4. Click **Generate**. The button label, spinner, and status line update
-   live; the worker runs off the main thread so Glyphs stays responsive.
+   - **Format** — `.glyphs` (Open Font source only), TTF, OTF, WOFF, or
+     WOFF2. WOFF and WOFF2 outputs from the file path are properly
+     compressed (not mislabelled sfnt bytes); the open-font path defers to
+     Glyphs' own export pipeline.
+   - **Output Folder** — defaults to the same folder as the source font
+     (file mode) or the open document's filepath (open-font mode), falling
+     back to `~/Desktop` if neither is set.
+4. Click **Generate**. The spinner and status line update live; the file
+   path runs off the main thread so Glyphs stays responsive. The open-font
+   path runs on the main thread because the Glyphs APIs require it.
 5. Click **Reveal** to surface the saved file in Finder.
 
 If the target file already exists, the plugin appends `-1`, `-2`, ... rather
@@ -90,7 +113,9 @@ A screenshot will be added once the next public Glyphs release is captured.
 
 ## How It Works
 
-Under the hood the plugin calls
+### File source — fontTools instancer
+
+For an exported `.ttf`/`.otf`/`.woff`/`.woff2` file the plugin calls
 [`fontTools.varLib.instancer`](https://fonttools.readthedocs.io/en/latest/varLib/instancer.html):
 
 1. **`compute_hull`** — finds the bounding box (min/max per axis) across all
@@ -109,6 +134,23 @@ Under the hood the plugin calls
    the same IDs are dropped to avoid stale name leakage).
 6. **WOFF/WOFF2 flavor** — set on the font before save so the writer produces
    a real WOFF wrapper instead of raw sfnt bytes with a `.woff` extension.
+
+### Open-font source — Glyphs-native pipeline
+
+For an open Glyphs document the plugin operates on the live `GSFont`:
+
+1. **`compute_gsfont_hull`** — finds the per-axis hull from selected
+   `GSInstance.axes` coordinates.
+2. **`clamp_gsfont`** — copies the font, removes unselected instances,
+   removes masters whose coordinates fall outside the hull, drops axes that
+   collapse to a single value, and rewrites `familyName`.
+3. **`.glyphs` output** — `save_gsfont_to_glyphs` writes the clamped font
+   to a new `.glyphs` source file (`makeCopy=True` leaves the user's open
+   document untouched).
+4. **Binary output (TTF/OTF/WOFF/WOFF2)** — the clamped font is saved to a
+   temp `.glyphs`, opened headlessly (`Glyphs.open(showInterface=False)`),
+   and exported via `GSInstance.generate(format=…, containers=…)` so Glyphs'
+   own compiler produces the final binary.
 
 ---
 
@@ -133,17 +175,21 @@ hyphen:
 # Install dev dependencies
 pip install -r requirements-dev.txt
 
-# Run the test suite (47 tests, ~0.1s)
+# Run the test suite
 pytest
 
 # Rebuild the distributable zip
 ./scripts/build-zip.sh
 ```
 
-The `core.py` module is framework-agnostic and imports nothing from Glyphs.app
-or AppKit. The Glyphs/AppKit shell lives in `plugin.py`. Tests live in
-`tests/` and use `fontTools.fontBuilder` to construct an in-memory variable
-font fixture (no external font files needed).
+`core.py` holds the fontTools helpers (file-source path) and, under an
+optional `from GlyphsApp import ...` guard, the GSFont helpers used by the
+open-Glyphs-font source path. The fontTools subset is framework-agnostic and
+importable in CI; the GSFont subset only resolves inside Glyphs.app. The
+AppKit/PyObjC dialog shell lives in `plugin.py`. Tests live in `tests/` and
+use `fontTools.fontBuilder` to construct an in-memory variable font fixture
+(no external font files needed); the GSFont helpers are exercised inside
+Glyphs.app and are not covered by CI.
 
 ---
 
@@ -184,6 +230,30 @@ range.
 The font's `fvar` table has no named instances, or all instance name IDs are
 missing from the `name` table. This can happen with fonts exported from
 certain tools. Check your export settings.
+
+**"No Glyphs fonts are currently open"**
+
+You selected `Open Font` as the source but no Glyphs documents are open in
+the foreground. Open the document you want to clamp, or switch to the
+`File` source and Browse to an exported variable font.
+
+**"That Glyphs font has no exportable named instances"**
+
+The selected Glyphs document either has no `GSInstance` entries, or every
+instance is a Variable Font Setting (which is skipped — it describes how to
+export a VF, not a static named instance).
+
+**"No masters fall within the hull of the selected instances"**
+
+vf-clamp cannot reconstruct the design space from instances alone — it
+prunes masters that fall outside the hull of selected instances. Pick at
+least two instances whose coordinates span existing masters.
+
+**"`.glyphs` output requires using an open Glyphs font as the source"**
+
+The `.glyphs` output format is only available when the source is an open
+Glyphs document. Switch the Source radio to `Open Font` (or pick TTF/OTF/
+WOFF/WOFF2 to use the file source).
 
 ---
 

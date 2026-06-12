@@ -157,13 +157,15 @@ class TestSafeOutputPath:
 
 	def test_basic(self, tmp_path):
 		out = core.safe_output_path(str(tmp_path), 'MyFont', '.ttf')
-		assert out.startswith(str(tmp_path))
+		import os as _os
+		assert out.startswith(_os.path.realpath(str(tmp_path)))
 		assert out.endswith('MyFont.ttf')
 
 	def test_path_traversal_blocked(self, tmp_path):
 		# A '/etc/passwd' family_name should not escape the folder
+		import os as _os
 		out = core.safe_output_path(str(tmp_path), '/etc/passwd', '.ttf')
-		assert out.startswith(str(tmp_path))
+		assert out.startswith(_os.path.realpath(str(tmp_path)))
 
 	def test_collision_suffix(self, tmp_path):
 		first = tmp_path / 'A.ttf'
@@ -173,3 +175,66 @@ class TestSafeOutputPath:
 		(tmp_path / 'A-1.ttf').write_bytes(b'x')
 		out2 = core.safe_output_path(str(tmp_path), 'A', '.ttf')
 		assert out2.endswith('A-2.ttf')
+
+
+# ---------------------------------------------------------------------------
+# check_fonttools_version
+# ---------------------------------------------------------------------------
+
+
+class TestCheckFonttoolsVersion:
+	"""Verify check_fonttools_version returns a tuple and rejects too-old."""
+
+	def test_returns_tuple_when_ok(self):
+		ver = core.check_fonttools_version()
+		assert isinstance(ver, tuple)
+		assert len(ver) == 3
+
+	def test_raises_when_unavailable(self, monkeypatch):
+		monkeypatch.setattr(core, '_FONTTOOLS_AVAILABLE', False)
+		monkeypatch.setattr(core, '_FONTTOOLS_IMPORT_ERROR', 'mocked')
+		with pytest.raises(RuntimeError, match='not available'):
+			core.check_fonttools_version()
+
+
+# ---------------------------------------------------------------------------
+# Public capability helpers
+# ---------------------------------------------------------------------------
+
+
+class TestPublicCapabilityHelpers:
+	"""Verify the public is_*/fonttools_import_error helpers."""
+
+	def test_is_fonttools_ready_true(self):
+		assert core.is_fonttools_ready() is True
+
+	def test_is_fonttools_ready_false_when_unavailable(self, monkeypatch):
+		monkeypatch.setattr(core, '_FONTTOOLS_AVAILABLE', False)
+		assert core.is_fonttools_ready() is False
+
+	def test_is_glyphs_app_available_matches_flag(self, monkeypatch):
+		monkeypatch.setattr(core, '_GLYPHS_AVAILABLE', True)
+		assert core.is_glyphs_app_available() is True
+		monkeypatch.setattr(core, '_GLYPHS_AVAILABLE', False)
+		assert core.is_glyphs_app_available() is False
+
+	def test_fonttools_import_error_when_available(self):
+		# When fontTools imported fine the error is None.
+		assert core.fonttools_import_error() is None
+
+
+# ---------------------------------------------------------------------------
+# extension_for_format / flavor_for_format edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestFormatEdgeCases:
+	"""Edge cases for the format mappers — GLYPHS sentinel and flavor None."""
+
+	def test_extension_for_glyphs(self):
+		assert core.extension_for_format('GLYPHS') == '.glyphs'
+		assert core.extension_for_format('glyphs') == '.glyphs'
+
+	def test_flavor_for_glyphs_returns_none(self):
+		# GLYPHS is not a fontTools flavor — should not pretend to be one.
+		assert core.flavor_for_format('GLYPHS') is None

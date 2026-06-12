@@ -67,7 +67,7 @@ class TestProduceRestrictedVF:
 			assert result['name'].getDebugName(1) == 'Restricted Family'
 
 	def test_save_pin_makes_static(self, vf_font_path, tmp_path):
-		out = str(tmp_path / 'static.ttf'.replace('static', 'pinned'))
+		out = str(tmp_path / 'pinned.ttf')
 		core.produce_restricted_vf(
 			vf_font_path, ['Regular'], 'Pinned Family', out, fmt='TTF'
 		)
@@ -120,5 +120,14 @@ class TestSafeOpenFont:
 	def test_garbage_file(self, tmp_path):
 		path = tmp_path / 'garbage.ttf'
 		path.write_bytes(b'not a font')
-		with pytest.raises(OSError):
+		# Parse failures raise FontParseError (subclass of ValueError) so
+		# callers can distinguish a corrupt font from a missing file.
+		with pytest.raises(core.FontParseError):
+			core._safe_open_font(str(path))
+
+	def test_font_parse_error_is_value_error(self, tmp_path):
+		"""FontParseError must remain a ValueError subclass for legacy callers."""
+		path = tmp_path / 'garbage.ttf'
+		path.write_bytes(b'not a font')
+		with pytest.raises(ValueError):
 			core._safe_open_font(str(path))

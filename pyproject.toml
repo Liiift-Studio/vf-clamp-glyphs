@@ -1,10 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "vf-clamp-glyphs"
-version = "1.0.0"
-description = "Glyphs.app plugin for generating restricted variable fonts (vf-clamp)"
+version = "1.1.0"
+description = "Glyphs.app plugin for generating restricted variable fonts (vf-clamp) — supports file source and open Glyphs documents"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 authors = [{ name = "Liiift Studio", email = "hello@liiift.studio" }]
 
 # Runtime dependencies for the core helpers (the Glyphs UI shell imports

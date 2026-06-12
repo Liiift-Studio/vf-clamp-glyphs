@@ -27,6 +27,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Run tests
+      - name: Run tests with coverage
         run: |
-          pytest -v --tb=short
+          pytest -v --tb=short --cov=core --cov-report=term-missing
+
+      - name: Build distributable zip (preflight smoke check)
+        run: |
+          chmod +x scripts/build-zip.sh
+          ./scripts/build-zip.sh
+        # build-zip.sh refuses to ship if Info.plist/pyproject.toml/CHANGELOG
+        # drift, if __pycache__ is present in the bundle, or if the zip
+        # contains a self-referential symlink or more than 50 entries.

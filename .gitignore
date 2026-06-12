@@ -29,3 +29,6 @@ test-output/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Agent memory (local-only working state)
+.agent/
