@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.1.5] — 2026-06-12
+
+- Fix: Instance checkboxes correctly rendered but **overlapped** the Hull / Output Name / Format / Folder rows below them. Cause: scroll widget grew downward at populate time while the rows below stayed at their original Y positions (vanilla widgets with positive Y don't auto-reflow). Fix: reserve the maximum scroll height (`MAX_VISIBLE_INSTANCES = 8` rows × 24px) at build time so every widget below sits at a fixed Y regardless of how many instances the font has. Trade-off: a font with 1-2 instances now shows some empty scroll space, but nothing overlaps and the window doesn't jump on font load.
+
 ## [1.1.4] — 2026-06-12
 
 - Fix: Format popup defaulted to `TTF` when launching with an open Glyphs document instead of `.glyphs` — the cross-mode "preserve user's selection" logic kept the file-mode default alive. Now always resets to the per-mode default on source mode change.

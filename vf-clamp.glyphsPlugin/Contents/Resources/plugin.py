@@ -228,6 +228,12 @@ class VFClampDialog:
 	ROW = 28
 	CHECK_H = 20
 	CHECK_GAP = 4
+	# Always reserve scroll-area space for this many visible rows at build time.
+	# Setting this once at the layout level (rather than min(n, 8) at populate
+	# time) keeps the widgets below the scroll area at stable Y positions —
+	# vanilla widgets with positive Y don't auto-reflow, so a growing scroll
+	# would otherwise overlap the Hull / Output Name / Format / Folder rows.
+	MAX_VISIBLE_INSTANCES = 8
 	# Filter-style layout: right-aligned label column + control column
 	LABEL_COL_W = 110
 	LABEL_GAP = 12
@@ -436,18 +442,24 @@ class VFClampDialog:
 		y += LABEL_H + 6
 
 		# --- Row 4: Instance scroll area (in the control column) -------
+		# Reserve MAX_VISIBLE_INSTANCES rows of vertical space up front so the
+		# Hull/Output/Format/Folder rows below sit at fixed Y positions and
+		# the scroll widget never has to resize at populate time.
+		reserved_scroll_h = (
+			self.MAX_VISIBLE_INSTANCES * (self.CHECK_H + self.CHECK_GAP) + 8
+		)
 		win.instancePlaceholder = vanilla.TextBox(
 			(CONTROL_X, y, -PAD, LABEL_H),
 			'Open a variable font to see its named instances.',
 			sizeStyle='small',
 		)
 		self._scroll_top_y = y
-		self._scroll_height = LABEL_H
+		self._scroll_height = reserved_scroll_h
 		# Seed the ScrollView with an empty placeholder Group; the document
 		# view is replaced by _populate_instance_checks when a font loads.
 		self._scroll_placeholder_group = vanilla.Group((0, 0, 1, 1))
 		win.instanceScroll = vanilla.ScrollView(
-			(CONTROL_X, y, -PAD, LABEL_H),
+			(CONTROL_X, y, -PAD, reserved_scroll_h),
 			self._scroll_placeholder_group._nsObject,
 			hasHorizontalScroller=False,
 			hasVerticalScroller=True,
@@ -462,7 +474,7 @@ class VFClampDialog:
 			)
 		except (AttributeError, RuntimeError):
 			pass
-		y += LABEL_H + 8
+		y += reserved_scroll_h + 8
 
 		# --- Row 5: Hull preview (colored axis chips) ------------------
 		win.hullLabel = self._right_label((PAD, y + 2, LABEL_COL_W, LABEL_H), 'Hull:')
@@ -641,7 +653,15 @@ class VFClampDialog:
 		self._static_sections_height = y
 
 	def _compute_window_height(self, n_instances):
-		"""Return total window height for ``n_instances`` checkboxes in the scroll area."""
+		"""Return total window height — always reserves space for MAX_VISIBLE_INSTANCES rows.
+
+		``n_instances`` is accepted for backward compatibility but no longer
+		affects the result. We reserve the maximum scroll area upfront so the
+		widgets below it (Hull / Output Name / Format / Folder / action bar)
+		stay at fixed Y positions regardless of font instance count. Trade-off:
+		a font with one or two instances renders some empty scroll space, but
+		nothing overlaps and the window doesn't jump on font load.
+		"""
 		PAD = self.PAD
 		LABEL_H = self.LABEL_H
 		ROW = self.ROW
@@ -650,8 +670,8 @@ class VFClampDialog:
 		CHECK_GAP = self.CHECK_GAP
 		HULL_H = self.HULL_H
 
-		visible_rows = max(1, min(n_instances, 8))
-		scroll_h = visible_rows * (CHECK_H + CHECK_GAP) + 8
+		# Reserve max scroll height once at the layout level.
+		scroll_h = self.MAX_VISIBLE_INSTANCES * (CHECK_H + CHECK_GAP) + 8
 
 		# Mirrors every `y +=` in _build_window so changes stay in sync.
 		return (
@@ -1448,16 +1468,9 @@ class VFClampDialog:
 		visible_rows = max(1, min(n, 8))
 		scroll_h = visible_rows * check_row + self.CHECK_GAP
 
-		# Resize the scroll widget FIRST, while it still has the placeholder doc
-		# view. This makes the clip view's bounds final before we swap in the
-		# real content — otherwise the new doc view inherits the placeholder's
-		# 1×1 frame in clip-view coordinates and renders off-screen.
-		# Use CONTROL_X (138) not PAD (16) so the position matches _build_window
-		# and the right-aligned label layout. Moving the scroll left of the
-		# label column was causing the previously-invisible checkboxes.
-		self.w.instanceScroll.setPosSize(
-			(self.CONTROL_X, self._scroll_top_y, -self.PAD, scroll_h)
-		)
+		# Scroll widget was built at its maximum size in _build_window — no
+		# resize needed here. This is the key change that prevents the scroll
+		# area from growing downward and overlapping the rows below it.
 
 		# Compute the document view width from the now-correct clip view size,
 		# minus a scrollbar reserve so content + scrollbar fit together.
