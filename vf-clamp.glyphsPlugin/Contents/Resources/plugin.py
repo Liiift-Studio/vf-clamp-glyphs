@@ -902,26 +902,23 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _refresh_format_popup(self) -> None:
-		"""Adjust the Format popup items to match the active source mode."""
+		"""Set the Format popup items + canonical default for the active source mode.
+
+		Always resets to the per-mode default. The previous "preserve user's
+		selection" logic surfaced a real bug: switching from file mode (default
+		TTF) into Open-Font mode kept TTF selected because TTF appears in both
+		format sets, so users never saw `.glyphs` as the headline option. Reset-
+		on-mode-change is the obvious UX and matches the mode-radio click pattern.
+		"""
 		if self._source_mode == self.SOURCE_GSFONT:
 			items = list(self.GSFONT_FORMATS)
 			default_idx = 0  # .glyphs is the headline output for an open font
 		else:
 			items = list(self.BINARY_FORMATS)
 			default_idx = 0  # TTF
-		# Try to preserve the user's existing selection if still valid.
-		try:
-			current_idx = self.w.formatPopup.get()
-			current_items = self.w.formatPopup.getItems()
-			current_label = current_items[current_idx] if 0 <= current_idx < len(current_items) else None
-		except Exception:
-			current_label = None
 		try:
 			self.w.formatPopup.setItems(items)
-			if current_label in items:
-				self.w.formatPopup.set(items.index(current_label))
-			else:
-				self.w.formatPopup.set(default_idx)
+			self.w.formatPopup.set(default_idx)
 		except Exception:
 			pass
 
@@ -1451,9 +1448,22 @@ class VFClampDialog:
 		visible_rows = max(1, min(n, 8))
 		scroll_h = visible_rows * check_row + self.CHECK_GAP
 
-		# 0-width sentinel '-0' previously left the group zero-wide; explicit
-		# width (W - 2*PAD - scrollbar) keeps children visible.
-		group_width = self.W - 2 * self.PAD - 18
+		# Resize the scroll widget FIRST, while it still has the placeholder doc
+		# view. This makes the clip view's bounds final before we swap in the
+		# real content — otherwise the new doc view inherits the placeholder's
+		# 1×1 frame in clip-view coordinates and renders off-screen.
+		# Use CONTROL_X (138) not PAD (16) so the position matches _build_window
+		# and the right-aligned label layout. Moving the scroll left of the
+		# label column was causing the previously-invisible checkboxes.
+		self.w.instanceScroll.setPosSize(
+			(self.CONTROL_X, self._scroll_top_y, -self.PAD, scroll_h)
+		)
+
+		# Compute the document view width from the now-correct clip view size,
+		# minus a scrollbar reserve so content + scrollbar fit together.
+		# Window width 540 - CONTROL_X (138) - PAD (16) = 386 visible clip width.
+		# Subtract 18 px scrollbar reserve = 368 px usable.
+		group_width = self.W - self.CONTROL_X - self.PAD - 18
 		inner_group = vanilla.Group((0, 0, group_width, inner_h))
 		self._checks = []
 		for idx, name in enumerate(names):
@@ -1482,22 +1492,34 @@ class VFClampDialog:
 
 		self._inner_group = inner_group
 
-		# Reset the previous document view's frame so AppKit can release it;
-		# without this the NSClipView keeps a strong reference to the old
-		# document view and memory grows on every font reload.
+		# Swap the document view. Explicitly set the inner_group's frame in
+		# clip-view coordinates first, then ask the scroll view to relayout via
+		# tile() + reflectScrolledClipView_ — without these, NSScrollView can
+		# leave the old placeholder's scroll range in place and the new content
+		# renders but is invisible behind the empty scroll area.
 		try:
 			scroll_ns = self.w.instanceScroll._nsObject
 			old_doc = scroll_ns.documentView()
 			if old_doc is not None and old_doc is not inner_group._nsObject:
 				old_doc.removeFromSuperview()
+			try:
+				from Foundation import NSMakeRect, NSMakePoint  # type: ignore
+				inner_group._nsObject.setFrame_(NSMakeRect(0, 0, group_width, inner_h))
+			except (ImportError, AttributeError):
+				pass
 			scroll_ns.setDocumentView_(inner_group._nsObject)
+			# Force NSScrollView to recompute its scroll range and redisplay.
+			try:
+				scroll_ns.tile()
+				scroll_ns.reflectScrolledClipView_(scroll_ns.contentView())
+				scroll_ns.setNeedsDisplay_(True)
+				inner_group._nsObject.setNeedsDisplay_(True)
+			except AttributeError:
+				pass
 		except Exception:
 			# Last-resort: leave previous doc view in place rather than crash.
 			pass
 
-		self.w.instanceScroll.setPosSize(
-			(self.PAD, self._scroll_top_y, -self.PAD, scroll_h)
-		)
 		self.w.instanceScroll.show(True)
 		# Surface the initial 0/N count.
 		self._refresh_selection_count()
