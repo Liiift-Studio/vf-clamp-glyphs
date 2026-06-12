@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.4 — 2026-06-12
+## [1.1.4] — 2026-06-12
 
 - Fix: Format popup defaulted to `TTF` when launching with an open Glyphs document instead of `.glyphs` — the cross-mode "preserve user's selection" logic kept the file-mode default alive. Now always resets to the per-mode default on source mode change.
 - Fix: Instance checkboxes were invisible inside the scroll area despite the font's instance count rendering correctly. Root cause: scroll widget moved from `CONTROL_X` to `PAD` during populate, leaving the inner_group's frame misaligned with the new clip view. Populate now resizes the scroll widget first (keeping it at `CONTROL_X` to match the build layout) before swapping the document view, explicitly sets the inner_group's frame, and calls `tile() + reflectScrolledClipView_()` so NSScrollView recomputes its scroll range.
