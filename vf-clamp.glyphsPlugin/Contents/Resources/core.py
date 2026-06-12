@@ -1,5 +1,15 @@
-# core.py — framework-agnostic helpers for vf-clamp Glyphs plugin.
+# core.py — framework-agnostic fontTools helpers for vf-clamp Glyphs plugin.
 # Importable outside Glyphs.app for unit testing; depends only on fontTools + stdlib.
+#
+# Architectural note (issue #60): the GSFont-side clamping subsystem (operating
+# on Glyphs source files via the GlyphsApp Python API) used to live below in
+# this same file. It now lives in the sibling module ``gsfont_core``. The two
+# subsystems have different exception policies, different abstraction layers,
+# and different runtime prerequisites, so they earned their own modules.
+#
+# For backward compatibility the public GSFont names are re-exported from this
+# module at the bottom of the file so existing callers (plugin.py, tests) keep
+# working with ``from core import clamp_gsfont`` style imports.
 
 import contextlib
 import copy
@@ -8,6 +18,10 @@ import re
 import shutil
 import tempfile
 import unicodedata
+
+# Central format registry — every dispatch by format label routes here so
+# adding a new format only touches formats.py instead of five call-sites.
+import formats as _formats
 
 try:
 	from fontTools.varLib import instancer
@@ -46,8 +60,15 @@ def fonttools_import_error():
 
 
 def is_glyphs_app_available():
-	"""Return True when running inside Glyphs.app with the GlyphsApp Python API."""
-	return _GLYPHS_AVAILABLE
+	"""Return True when running inside Glyphs.app with the GlyphsApp Python API.
+
+	The actual flag lives on ``gsfont_core`` after the core/gsfont_core split
+	(issue #60). We import lazily and read through ``gsfont_core`` rather than
+	through the module-level __getattr__ proxy because the proxy is not yet
+	installed when this function is defined at import time.
+	"""
+	import gsfont_core as _gc
+	return _gc._GLYPHS_AVAILABLE
 
 
 def open_font_safely(font_path):
@@ -65,19 +86,37 @@ _UNICODE_DIRECTIONAL_RE = re.compile(
 _TRIM_DOTS_SPACES_RE = re.compile(r'^[. ]+|[. ]+$')
 
 
+# Memoised parse of check_fonttools_version() keyed by ``fontTools.__version__``.
+# The version string is fixed for the lifetime of a production process, so we
+# cache the parsed tuple to avoid re-running the regex on every UI refresh and
+# every produce_restricted_vf call. Keying on the raw string means test-time
+# ``monkeypatch.setattr(fontTools, '__version__', …)`` automatically invalidates
+# the cache without needing a bespoke reset hook.
+_CHECKED_FONTTOOLS_RAW = None
+_CHECKED_FONTTOOLS_VERSION = None
+
+
 def check_fonttools_version():
 	"""Raise RuntimeError if fontTools is missing or too old for instancer.AxisTriple.
 
-	Returns the parsed version tuple on success.
+	Returns the parsed version tuple on success. The result is memoised against
+	``fontTools.__version__`` — repeated calls with the same underlying version
+	just return the cached parse.
 	"""
+	global _CHECKED_FONTTOOLS_RAW, _CHECKED_FONTTOOLS_VERSION
+	# Availability check always runs — it covers both genuine import failure
+	# AND test-time monkeypatching of _FONTTOOLS_AVAILABLE.
 	if not _FONTTOOLS_AVAILABLE:
 		raise RuntimeError(
 			f'fontTools is not available: {_FONTTOOLS_IMPORT_ERROR}'
 		)
 	raw = getattr(fontTools, '__version__', '0.0.0')
+	if raw == _CHECKED_FONTTOOLS_RAW and _CHECKED_FONTTOOLS_VERSION is not None:
+		return _CHECKED_FONTTOOLS_VERSION
 	# Parse leading 'X.Y.Z' segments
 	parts = re.match(r'(\d+)\.(\d+)\.?(\d+)?', raw)
 	if not parts:
+		# Unparseable versions are NOT cached — preserve fall-through behaviour.
 		return (0, 0, 0)
 	version = (
 		int(parts.group(1)),
@@ -89,6 +128,8 @@ def check_fonttools_version():
 			f'fontTools >= {".".join(str(v) for v in MIN_FONTTOOLS_VERSION)} '
 			f'is required for axis instancing; found {raw}.'
 		)
+	_CHECKED_FONTTOOLS_RAW = raw
+	_CHECKED_FONTTOOLS_VERSION = version
 	return version
 
 
@@ -189,24 +230,21 @@ def compute_default_output_name(basename, first_style, last_style):
 
 
 def extension_for_format(fmt):
-	"""Return the file extension for a format label (TTF, OTF, WOFF, WOFF2, GLYPHS)."""
-	return {
-		'TTF': '.ttf',
-		'OTF': '.otf',
-		'WOFF': '.woff',
-		'WOFF2': '.woff2',
-		'GLYPHS': '.glyphs',
-	}.get(str(fmt).upper(), '.ttf')
+	"""Return the file extension for a format label (TTF, OTF, WOFF, WOFF2, GLYPHS).
+
+	Thin wrapper around :mod:`formats` so adding a new format only requires
+	editing the registry — callers still see the same module-level alias.
+	"""
+	return _formats.extension_for(fmt)
 
 
 def flavor_for_format(fmt):
-	"""Return the fontTools flavor string for WOFF/WOFF2, or None for raw sfnt."""
-	f = str(fmt).upper()
-	if f == 'WOFF':
-		return 'woff'
-	if f == 'WOFF2':
-		return 'woff2'
-	return None
+	"""Return the fontTools flavor string for WOFF/WOFF2, or None for raw sfnt.
+
+	Thin wrapper around :mod:`formats` so adding a new format only requires
+	editing the registry — callers still see the same module-level alias.
+	"""
+	return _formats.flavor_for(fmt)
 
 
 def _disambiguated_instance_labels(name_table, fvar_instances):
@@ -305,49 +343,188 @@ def filter_fvar_instances(font, selected_names):
 	fvar.instances = kept
 
 
-def prune_stat_axis_values(font, hull):
-	"""Remove STAT AxisValue records that fall outside ``hull``.
+def _hull_bounds(constraint):
+	"""Return (lo, hi) for a hull entry — either a scalar pin or an AxisTriple/tuple.
 
-	Only handles AxisValueFormat 1 (single value) and 3 (linked); other formats
-	are left intact. No-op when STAT is absent.
+	``instancer.AxisTriple`` is a Sequence (not a tuple subclass), so we test
+	indexability rather than ``isinstance(..., tuple)``. A bare numeric pin
+	collapses to ``(value, value)`` so callers can treat both shapes uniformly.
+	"""
+	if hasattr(constraint, '__len__') and not isinstance(constraint, (int, float)):
+		return constraint[0], constraint[-1]
+	return constraint, constraint
+
+
+def prune_stat_axis_values(font, hull):
+	"""Prune STAT AxisValue records and DesignAxisRecord entries to match ``hull``.
+
+	AxisValue handling per format:
+
+	* Format 1 (single value) — keep when ``Value`` lies inside the hull.
+	* Format 2 (range) — keep when ``[RangeMinValue, RangeMaxValue]`` intersects
+	  the hull. The surviving record's range is clamped to the hull so it does
+	  not advertise a span the file can no longer reach; ``NominalValue`` is
+	  re-anchored into the clamped range when it would otherwise fall outside.
+	* Format 3 (linked) — keep when both ``Value`` and ``LinkedValue`` lie
+	  inside the hull. A LinkedValue pointing outside the new range would lie
+	  about a style link the restricted file cannot reach.
+	* Format 4 (multi-axis) — keep only when every component ``AxisValueRecord``
+	  references an axis the font still has and falls inside that axis's hull.
+
+	DesignAxisRecord is pruned for axes the instancer removed from fvar
+	(i.e. pinned axes whose tag no longer appears in ``font['fvar']``). The
+	``AxisIndex`` on every surviving AxisValue is re-mapped to the new
+	DesignAxisRecord positions, and the ``Format 4`` per-component records are
+	re-mapped as well. ``DesignAxisCount`` is kept in sync. ``AxisValueCount``
+	is updated to match the kept list.
+
+	``ElidedFallbackNameID`` is left untouched: it points into the name table,
+	not the AxisValue table, so STAT pruning does not invalidate it.
+
+	No-op when STAT is absent.
 	"""
 	if 'STAT' not in font:
 		return
 	stat = font['STAT'].table
 	axis_records = getattr(stat, 'DesignAxisRecord', None)
-	if axis_records is None or not getattr(stat, 'AxisValueArray', None):
+	if axis_records is None:
 		return
 	tag_for_index = [ax.AxisTag for ax in axis_records.Axis]
+	# Tags still present in the (post-instancer) fvar — axes the instancer
+	# pinned away are absent from fvar. We treat absence-but-in-hull as "the
+	# instancer dropped this axis"; absence-but-not-in-hull as "the font never
+	# had it" (e.g. a STAT axis that fvar didn't carry).
+	fvar_tags = (
+		{ax.axisTag for ax in font['fvar'].axes}
+		if 'fvar' in font
+		else set()
+	)
 
-	kept = []
-	for av in stat.AxisValueArray.AxisValue:
-		fmt = getattr(av, 'Format', None)
-		axis_idx = getattr(av, 'AxisIndex', None)
-		if axis_idx is None or axis_idx >= len(tag_for_index):
-			kept.append(av)
-			continue
-		tag = tag_for_index[axis_idx]
-		constraint = hull.get(tag)
-		if constraint is None:
-			kept.append(av)
-			continue
-		if isinstance(constraint, tuple):
-			lo, hi = constraint[0], constraint[-1]
-		else:
-			lo = hi = constraint
-		if fmt in (1, 3):
-			val = getattr(av, 'Value', None)
-			if val is None or lo <= val <= hi:
+	value_array = getattr(stat, 'AxisValueArray', None)
+	if value_array is not None:
+		kept = []
+		for av in value_array.AxisValue:
+			fmt = getattr(av, 'Format', None)
+			if fmt == 4:
+				# Multi-axis record: keep only when every component axis is
+				# still present and every component value lies inside its hull.
+				records = getattr(av, 'AxisValueRecord', None) or []
+				ok = bool(records)
+				for rec in records:
+					rec_idx = getattr(rec, 'AxisIndex', None)
+					if rec_idx is None or rec_idx >= len(tag_for_index):
+						ok = False
+						break
+					rec_tag = tag_for_index[rec_idx]
+					if rec_tag in hull and rec_tag not in fvar_tags:
+						# Axis was pinned out by the instancer.
+						ok = False
+						break
+					constraint = hull.get(rec_tag)
+					if constraint is None:
+						continue
+					lo, hi = _hull_bounds(constraint)
+					val = getattr(rec, 'Value', None)
+					if val is None or not (lo <= val <= hi):
+						ok = False
+						break
+				if ok:
+					kept.append(av)
+				continue
+
+			axis_idx = getattr(av, 'AxisIndex', None)
+			if axis_idx is None or axis_idx >= len(tag_for_index):
 				kept.append(av)
-			continue
-		# Unknown format — keep
-		kept.append(av)
-	stat.AxisValueArray.AxisValue = kept
-	stat.AxisValueCount = len(kept)
+				continue
+			tag = tag_for_index[axis_idx]
+			# Drop AxisValue records whose axis was pinned out of fvar.
+			if tag in hull and tag not in fvar_tags:
+				continue
+			constraint = hull.get(tag)
+			if constraint is None:
+				kept.append(av)
+				continue
+			lo, hi = _hull_bounds(constraint)
+			if fmt == 1:
+				val = getattr(av, 'Value', None)
+				if val is None or lo <= val <= hi:
+					kept.append(av)
+			elif fmt == 2:
+				rmin = getattr(av, 'RangeMinValue', None)
+				rmax = getattr(av, 'RangeMaxValue', None)
+				nominal = getattr(av, 'NominalValue', None)
+				if rmin is None or rmax is None:
+					kept.append(av)
+					continue
+				# Keep only when the advertised range intersects the hull.
+				if rmax < lo or rmin > hi:
+					continue
+				# Clamp the surviving record so it doesn't advertise a span
+				# the restricted file no longer carries.
+				av.RangeMinValue = max(rmin, lo)
+				av.RangeMaxValue = min(rmax, hi)
+				if nominal is not None and not (av.RangeMinValue <= nominal <= av.RangeMaxValue):
+					av.NominalValue = av.RangeMinValue
+				kept.append(av)
+			elif fmt == 3:
+				val = getattr(av, 'Value', None)
+				linked = getattr(av, 'LinkedValue', None)
+				if val is None or not (lo <= val <= hi):
+					continue
+				# A LinkedValue pointing outside the new hull would advertise a
+				# style link that the restricted file cannot reach.
+				if linked is not None and not (lo <= linked <= hi):
+					continue
+				kept.append(av)
+			else:
+				# Unknown format — keep to avoid silently dropping data we
+				# do not understand.
+				kept.append(av)
+		value_array.AxisValue = kept
+		stat.AxisValueCount = len(kept)
+
+	# Prune DesignAxisRecord for axes the instancer pinned out, then re-map
+	# AxisIndex on surviving AxisValue records (including Format 4 sub-records).
+	axis_array = axis_records.Axis
+	pinned_indices = {
+		i for i, ax in enumerate(axis_array)
+		if ax.AxisTag in hull and ax.AxisTag not in fvar_tags
+	}
+	if pinned_indices:
+		old_to_new = {}
+		new_axes = []
+		for i, ax in enumerate(axis_array):
+			if i in pinned_indices:
+				continue
+			old_to_new[i] = len(new_axes)
+			new_axes.append(ax)
+		axis_records.Axis = new_axes
+		stat.DesignAxisCount = len(new_axes)
+		if value_array is not None:
+			for av in value_array.AxisValue:
+				fmt = getattr(av, 'Format', None)
+				if fmt == 4:
+					records = getattr(av, 'AxisValueRecord', None) or []
+					for rec in records:
+						old = getattr(rec, 'AxisIndex', None)
+						if old in old_to_new:
+							rec.AxisIndex = old_to_new[old]
+				else:
+					old = getattr(av, 'AxisIndex', None)
+					if old in old_to_new:
+						av.AxisIndex = old_to_new[old]
 
 
-def patch_name_table(font, family_name):
-	"""Update name IDs 1, 4, 6, 16, 17, 25 to reflect the restricted VF.
+def patch_name_table(font, family_name, subfamily=None):
+	"""Update name IDs 1, 2, 4, 6, 16, 17, 25 to reflect the restricted VF.
+
+	``subfamily`` controls nameID 2 (subfamily) and nameID 17 (typographic
+	subfamily). When omitted it defaults to ``'Regular'`` — appropriate for a
+	ranged output where the file represents the family-at-default-location.
+	For a single-instance pin, callers should pass the picked instance's
+	subfamily so nameID 2 (and the Full Name 1+2 pairing) stay coherent with
+	what the file actually represents (e.g. pinning the ``Bold`` instance
+	should yield nameID 2 = ``Bold`` and nameID 4 = ``{family} Bold``).
 
 	Both Windows (platformID=3, UTF-16-BE) and Mac (platformID=1, mac_roman)
 	records for English (langID 0x0409 / 0) are updated. Non-English localised
@@ -355,21 +532,24 @@ def patch_name_table(font, family_name):
 	mac_roman records that cannot encode the family name are dropped.
 	"""
 	ps_name = sanitize_ps_name(family_name)
-	# Heuristic subfamily fallback so Full Name (1+2) and Typo Full (16+17) stay coherent
-	subfamily_fallback = 'Regular'
+	# Subfamily name keeps Full Name (1+2) and Typo Full (16+17) coherent.
+	# For a pin we expect the picked instance's subfamily (e.g. 'Bold');
+	# for a range we fall back to 'Regular' (the family-at-default convention).
+	subfamily_value = (subfamily or 'Regular').strip() or 'Regular'
 
 	name_table = font['name']
 	existing_ids = {r.nameID for r in name_table.names}
 
 	updates = {
 		1: family_name,
-		4: f'{family_name} {subfamily_fallback}'.strip(),
+		2: subfamily_value,
+		4: f'{family_name} {subfamily_value}'.strip(),
 		6: ps_name,
 	}
 	if 16 in existing_ids:
 		updates[16] = family_name
 		# Pair nameID 17 with nameID 16 to satisfy Windows GDI requirements
-		updates[17] = subfamily_fallback
+		updates[17] = subfamily_value
 	if 25 in existing_ids:
 		# Variations PostScript Name Prefix recommends <=27 chars, no trailing '-'
 		updates[25] = ps_name[:27].rstrip('-') or 'Font'
@@ -521,6 +701,135 @@ def _unlink_quiet(path):
 		pass
 
 
+# ---------------------------------------------------------------------------
+# OS/2 + head.macStyle synchronisation
+# ---------------------------------------------------------------------------
+
+# Standard usWidthClass mapping. Width values are wdth-axis percentages
+# (50..200) and the OS/2 class is 1..9 per the OpenType spec.
+_WIDTH_CLASS_BREAKPOINTS = (
+	(62.5, 1),   # Ultra-condensed
+	(75.0, 2),   # Extra-condensed
+	(87.5, 3),   # Condensed
+	(100.0, 4),  # Semi-condensed
+	(112.5, 5),  # Medium / Normal
+	(125.0, 6),  # Semi-expanded
+	(150.0, 7),  # Expanded
+	(200.0, 8),  # Extra-expanded
+)
+
+
+def _width_class_for_wdth(value):
+	"""Map a wdth-axis value (50..200) to an OS/2.usWidthClass integer (1..9)."""
+	for boundary, cls in _WIDTH_CLASS_BREAKPOINTS:
+		if value < boundary:
+			return cls
+	return 9
+
+
+# OS/2.fsSelection bits we touch.
+_FS_ITALIC = 0x01
+_FS_BOLD = 0x20
+_FS_REGULAR = 0x40
+_FS_OBLIQUE = 0x200
+
+# head.macStyle bits we touch.
+_MAC_BOLD = 0x01
+_MAC_ITALIC = 0x02
+
+
+def _default_location_after_instancing(font, hull):
+	"""Return the effective default location after instancing.
+
+	For axes still in fvar, the instancer has already chosen a default
+	(typically the anchored midpoint). For axes the instancer pinned out, the
+	pinned value lives only in the hull we passed in. We merge the two so the
+	OS/2 update works for fully-pinned, fully-ranged, and mixed cases.
+	"""
+	location = {}
+	if 'fvar' in font:
+		for ax in font['fvar'].axes:
+			location[ax.axisTag] = ax.defaultValue
+	for tag, constraint in hull.items():
+		if tag in location:
+			continue
+		# Axis pinned out of fvar — the hull is the pin value (scalar) or a
+		# pinned range (use the lo edge). Note: instancer.AxisTriple is a
+		# Sequence but NOT a tuple subclass, so we test indexability.
+		lo, _ = _hull_bounds(constraint)
+		location[tag] = lo
+	return location
+
+
+def update_os2_and_macstyle_from_fvar(font, hull=None):
+	"""Recompute OS/2 weight/width/fsSelection and head.macStyle from fvar.
+
+	For each axis tag we look at the *default location* still advertised by the
+	(post-instancer) fvar table — plus any axis the instancer pinned out of
+	fvar entirely (those values come from ``hull``):
+
+	* ``wght`` -> ``OS/2.usWeightClass`` (rounded, clamped to 1..1000) and the
+	  ``BOLD`` bits in fsSelection / macStyle when the default >= 600.
+	* ``wdth`` -> ``OS/2.usWidthClass`` via the standard 50..200 -> 1..9 map.
+	* ``ital`` (>= 0.5) or ``slnt`` (negative) -> ``ITALIC`` bits in fsSelection
+	  and macStyle. A negative slnt without an ital axis is conventionally
+	  recorded as oblique as well.
+	* ``REGULAR`` is set iff none of BOLD / ITALIC / OBLIQUE end up set.
+
+	``hull`` is optional. When passed, axes the instancer pinned out of fvar
+	(so their default no longer appears in ``font['fvar']``) are recovered
+	from the hull entry. When omitted, only axes still in fvar contribute.
+	"""
+	if 'OS/2' not in font:
+		return
+	if hull is None:
+		hull = {}
+	defaults = _default_location_after_instancing(font, hull)
+	if not defaults:
+		return
+	os2 = font['OS/2']
+	head = font['head'] if 'head' in font else None
+
+	wght = defaults.get('wght')
+	wdth = defaults.get('wdth')
+	ital = defaults.get('ital')
+	slnt = defaults.get('slnt')
+
+	if wght is not None:
+		os2.usWeightClass = max(1, min(1000, int(round(wght))))
+	if wdth is not None:
+		os2.usWidthClass = _width_class_for_wdth(wdth)
+
+	# Resolve italic / oblique. ital is a boolean-style axis (0 = upright,
+	# 1 = italic); slnt is signed degrees, with negative values forward-leaning
+	# (conventionally italic / oblique).
+	is_italic = (ital is not None and ital >= 0.5) or (slnt is not None and slnt < 0)
+	is_oblique = slnt is not None and slnt < 0 and (ital is None or ital < 0.5)
+	is_bold = wght is not None and wght >= 600
+
+	fs = getattr(os2, 'fsSelection', 0) or 0
+	# Clear the bits we own then re-set the ones the new default warrants.
+	fs &= ~(_FS_ITALIC | _FS_BOLD | _FS_REGULAR | _FS_OBLIQUE)
+	if is_italic:
+		fs |= _FS_ITALIC
+	if is_oblique:
+		fs |= _FS_OBLIQUE
+	if is_bold:
+		fs |= _FS_BOLD
+	if not (is_italic or is_oblique or is_bold):
+		fs |= _FS_REGULAR
+	os2.fsSelection = fs
+
+	if head is not None:
+		mac = getattr(head, 'macStyle', 0) or 0
+		mac &= ~(_MAC_BOLD | _MAC_ITALIC)
+		if is_bold:
+			mac |= _MAC_BOLD
+		if is_italic or is_oblique:
+			mac |= _MAC_ITALIC
+		head.macStyle = mac
+
+
 def produce_restricted_vf(font_path, selected_names, family_name, output_path, fmt='TTF'):
 	"""Load ``font_path``, restrict axes to the hull of ``selected_names``,
 	patch names, prune STAT/fvar instances, set the WOFF flavor if requested,
@@ -550,7 +859,23 @@ def produce_restricted_vf(font_path, selected_names, family_name, output_path, f
 		# Filter fvar named instances so the output advertises only the licensed range
 		filter_fvar_instances(partial, selected_names)
 		prune_stat_axis_values(partial, hull)
-		patch_name_table(partial, family_name)
+		# Derive the subfamily for nameID 2/17: for a single-instance pin we use
+		# the picked subfamily name verbatim (sans any '#N' disambiguation
+		# suffix) so Full Name (1+2) reflects what the file actually contains.
+		# For multi-instance ranges we leave it None so patch_name_table falls
+		# back to 'Regular' — the standard family-at-default convention for VFs.
+		subfamily_for_name = None
+		if len(selected_names) == 1:
+			only = selected_names[0]
+			# Strip the ' #N' disambiguation suffix used by get_instance_names
+			only = re.sub(r' #\d+$', '', only)
+			subfamily_for_name = only or None
+		patch_name_table(partial, family_name, subfamily=subfamily_for_name)
+		# Update OS/2 + head.macStyle to reflect the new fvar default (or the
+		# pinned location). fontTools' instancer is incomplete here — slant/
+		# italic-derived bits in fsSelection/macStyle are never set, and older
+		# fontTools versions skip the weight/width recompute for ranged outputs.
+		update_os2_and_macstyle_from_fvar(partial, hull)
 
 		flavor = flavor_for_format(fmt)
 		if flavor is not None:
@@ -575,389 +900,79 @@ def produce_restricted_vf(font_path, selected_names, family_name, output_path, f
 
 
 # ---------------------------------------------------------------------------
-# GSFont-side clamping — operates on Glyphs.app source files (.glyphs).
-# These helpers only resolve when the GlyphsApp Python module is importable,
-# which is true inside Glyphs but not in standalone unit-test runs.
+# GSFont-side clamping — moved to gsfont_core.py (issue #60: subsystem split).
+# These names are re-exported here so existing callers
+# (plugin.py, tests/test_gsfont_helpers.py) continue to work with their current
+# `from core import …` style. New call sites should prefer importing directly
+# from ``gsfont_core``.
 # ---------------------------------------------------------------------------
 
-try:
-	from GlyphsApp import (
-		Glyphs,
-		GSInstance,
-		INSTANCETYPEVARIABLE,
-		PLAIN,
-		WOFF,
-		WOFF2,
-	)
-	_GLYPHS_AVAILABLE = True
-	_GLYPHS_IMPORT_ERROR = None
-except ImportError as _gerr:
-	_GLYPHS_AVAILABLE = False
-	_GLYPHS_IMPORT_ERROR = str(_gerr)
-	Glyphs = None  # type: ignore
-	GSInstance = None  # type: ignore
-	INSTANCETYPEVARIABLE = 1  # type: ignore  (fallback constant)
-	PLAIN = WOFF = WOFF2 = None  # type: ignore
+import gsfont_core as _gsfont_core
+from gsfont_core import (  # noqa: F401  (re-export by name)
+	list_open_glyphs_fonts,
+	gsfont_label,
+	gsfont_instance_names,
+	compute_gsfont_hull,
+	clamp_gsfont,
+	save_gsfont_to_glyphs,
+	export_gsfont_binary_via_glyphs,
+)
+# Private helpers exposed for the existing unit tests (test_gsfont_helpers
+# pokes at ``core._outline_format_for`` and ``core._container_for_format``).
+from gsfont_core import (  # noqa: F401
+	_is_variable_instance,
+	_deepcopy_gsfont,
+	_container_for_format,
+	_outline_format_for,
+)
 
 
-def _is_variable_instance(inst):
-	"""Return True for a Variable Font Setting instance (not a static named instance)."""
-	return getattr(inst, 'type', 0) == INSTANCETYPEVARIABLE
+# The capability flag and the INSTANCETYPEVARIABLE sentinel live on
+# ``gsfont_core`` but several tests monkeypatch them on ``core``. To keep the
+# legacy ``monkeypatch.setattr(core, '_GLYPHS_AVAILABLE', …)`` pattern working
+# we forward those names through a module-level __getattr__ / __setattr__
+# pair: reading or writing ``core._GLYPHS_AVAILABLE`` proxies to the canonical
+# attribute on ``gsfont_core`` so a single monkeypatched flag drives behaviour
+# in both modules.
+
+_PROXIED_GSFONT_ATTRS = {
+	'_GLYPHS_AVAILABLE',
+	'_GLYPHS_IMPORT_ERROR',
+	'INSTANCETYPEVARIABLE',
+	'Glyphs',
+	'GSInstance',
+	'PLAIN',
+	'WOFF',
+	'WOFF2',
+}
 
 
-def list_open_glyphs_fonts():
-	"""Return the list of open ``GSFont`` documents, or [] when Glyphs is unavailable."""
-	if not _GLYPHS_AVAILABLE:
-		return []
-	try:
-		return list(Glyphs.fonts)
-	except Exception:
-		return []
+def __getattr__(name):
+	"""Proxy a small set of GSFont-side names through from gsfont_core.
 
-
-def gsfont_label(gsfont):
-	"""Return a short, human-readable label for a GSFont (used in PopUp lists)."""
-	family = getattr(gsfont, 'familyName', '') or 'Untitled'
-	doc_path = ''
-	try:
-		doc_path = gsfont.filepath or ''
-	except (AttributeError, OSError):
-		# Glyphs may not have a filepath set, or filesystem access may fail.
-		pass
-	if doc_path:
-		base = os.path.basename(doc_path)
-		return f'{family}  ({base})'
-	return family
-
-
-def gsfont_instance_names(gsfont):
-	"""Return ordered names of *static* named instances in a GSFont (skips Variable Font Settings)."""
-	out = []
-	for inst in gsfont.instances:
-		if _is_variable_instance(inst):
-			continue
-		name = (inst.name or '').strip()
-		if name:
-			out.append(name)
-	return out
-
-
-def compute_gsfont_hull(gsfont, selected_names):
-	"""Compute the per-axis hull from selected GSInstance coordinates.
-
-	Returns ``dict[axis_tag, (lo, hi)]`` in design units. Axes that are absent
-	from the font are skipped. Variable Font Setting instances are ignored.
+	Keeps legacy ``core._GLYPHS_AVAILABLE`` reads / monkeypatches working after
+	the core/gsfont_core split.
 	"""
-	selected_set = set(selected_names)
-	axis_tags = [getattr(ax, 'axisTag', '') or '' for ax in gsfont.axes]
-	hull = {}
-	for inst in gsfont.instances:
-		if _is_variable_instance(inst):
-			continue
-		if (inst.name or '') not in selected_set:
-			continue
-		coords = list(inst.axes)
-		for tag, val in zip(axis_tags, coords):
-			if not tag:
-				continue
-			if tag not in hull:
-				hull[tag] = [val, val]
-			else:
-				hull[tag][0] = min(hull[tag][0], val)
-				hull[tag][1] = max(hull[tag][1], val)
-	return {tag: (lo, hi) for tag, (lo, hi) in hull.items()}
+	if name in _PROXIED_GSFONT_ATTRS:
+		return getattr(_gsfont_core, name)
+	raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
-def _deepcopy_gsfont(gsfont):
-	"""Return a true deep clone of ``gsfont`` that does not share state with the source.
+import sys as _sys
 
-	Glyphs 3's ``GSFont.copy()`` inherits NSObject's NSCopying, which is a
-	shallow copy — masters/instances/glyphs collections still reference the
-	same Obj-C objects as the source. Mutating ``new_font.masters`` then bleeds
-	into the user's open document. The reliable Glyphs-side deep-clone path is
-	save-to-temp-file then re-open: this serialises the entire state and re-
-	parses it into fresh Obj-C objects.
+class _CoreModuleProxy(_sys.modules[__name__].__class__):
+	"""Module subclass that forwards GSFont attr writes to gsfont_core.
 
-	In CI (where ``_GLYPHS_AVAILABLE`` is False) the input is a Python fake
-	that supports ``copy.deepcopy`` directly — we use that as the fallback.
+	Needed because ``monkeypatch.setattr(core, '_GLYPHS_AVAILABLE', False)`` in
+	the legacy test suite must actually flip the flag the runtime code reads,
+	which now lives on gsfont_core.
 	"""
-	# When Glyphs is not available or the input is a Python fake (no .save
-	# method bound to the GSFont scripting API), fall back to copy.deepcopy.
-	if not _GLYPHS_AVAILABLE or not callable(getattr(gsfont, 'save', None)) or Glyphs is None:
-		return copy.deepcopy(gsfont)
-	# Try the save-and-reopen round-trip first. This is what Glyphs' own
-	# scripting cookbook recommends for a true deep clone.
-	tmp_dir = tempfile.mkdtemp(prefix='vfclamp-clone-')
-	tmp_path = os.path.join(tmp_dir, 'clone.glyphs')
-	try:
-		# makeCopy=True writes a new file without changing the source's
-		# tracked filepath or flipping its dirty flag.
-		gsfont.save(path=tmp_path, formatVersion=3, makeCopy=True)
-		try:
-			reopened = Glyphs.open(tmp_path, showInterface=False)
-		except TypeError:
-			reopened = Glyphs.open(tmp_path)
-		if reopened is None:
-			raise RuntimeError('Could not reopen temp clone of GSFont')
-		return reopened
-	finally:
-		# Best-effort cleanup — Glyphs may still hold the file handle until
-		# the reopened document is closed by the caller, but the temp file
-		# is no longer needed for the clone itself.
-		try:
-			shutil.rmtree(tmp_dir, ignore_errors=True)
-		except OSError:
-			pass
+
+	def __setattr__(self, name, value):
+		if name in _PROXIED_GSFONT_ATTRS:
+			setattr(_gsfont_core, name, value)
+			return
+		super().__setattr__(name, value)
 
 
-def clamp_gsfont(gsfont, selected_instance_names, output_family_name):
-	"""Return a clamped *copy* of ``gsfont``.
-
-	The source font is never mutated. The returned ``GSFont`` has:
-
-	* every instance not in ``selected_instance_names`` removed (Variable Font
-	  Setting entries are retained — they describe how to export a VF);
-	* every master whose coordinates fall outside the hull of the selected
-	  instances on any axis removed;
-	* any axis whose hull collapses to a single value removed entirely (so a
-	  single-instance selection produces a static single-master font);
-	* ``familyName`` rewritten to ``output_family_name``.
-	"""
-	if not _GLYPHS_AVAILABLE:
-		raise RuntimeError(
-			f'GlyphsApp Python API not available: {_GLYPHS_IMPORT_ERROR}'
-		)
-
-	selected_set = set(selected_instance_names)
-	if not selected_set:
-		raise ValueError('No instances selected for clamp')
-
-	hull = compute_gsfont_hull(gsfont, selected_instance_names)
-	if not hull:
-		raise ValueError('Selected instances yielded an empty axis hull')
-
-	# Deep-clone the source font so mutations never leak back into the user's
-	# open document. GSFont's NSCopying conformance is a shallow copy in
-	# Glyphs 3 (inherited from NSObject — the Python wrapper does not override
-	# it to deep-copy masters/instances/glyphs), so calling gsfont.copy()
-	# would still share collection elements with the source. We round-trip
-	# via the canonical Glyphs save-to-temp-file-and-reopen path when
-	# available, falling back to copy.deepcopy() for the unit-test fake.
-	new_font = _deepcopy_gsfont(gsfont)
-	axis_tags = [getattr(ax, 'axisTag', '') or '' for ax in new_font.axes]
-
-	# 1. Drop unselected named instances (keep Variable Font Settings).
-	new_font.instances = [
-		inst for inst in new_font.instances
-		if _is_variable_instance(inst) or (inst.name or '') in selected_set
-	]
-
-	# 2. Drop masters whose coords lie outside the hull on any axis. For pure
-	# pin selections (hull fully collapses to a point) we tolerate a small
-	# floating-point delta — a master at (399.9999) vs an instance at (400) is
-	# still the correct master to keep.
-	_PIN_EPSILON = 1e-6
-	all_collapsed = all(lo == hi for (lo, hi) in hull.values())
-	surviving = []
-	for master in list(new_font.masters):
-		coords = list(master.axes)
-		inside = True
-		for tag, val in zip(axis_tags, coords):
-			rng = hull.get(tag)
-			if rng is None:
-				continue
-			lo, hi = rng
-			if val < lo - _PIN_EPSILON or val > hi + _PIN_EPSILON:
-				inside = False
-				break
-		if inside:
-			surviving.append(master)
-	if not surviving:
-		# Tailor the message to whether the user picked a single pin or a
-		# multi-instance range — the recovery is different in each case.
-		if all_collapsed:
-			raise RuntimeError(
-				'The selected instance does not coincide with any existing master. '
-				'vf-clamp does not interpolate new masters — add a master at the '
-				'selected instance coordinates in Glyphs, or pick an instance '
-				'whose coordinates already match a master.'
-			)
-		raise RuntimeError(
-			'No masters fall within the hull of the selected instances. '
-			'vf-clamp cannot reconstruct the design space from instances alone — '
-			'pick at least two instances whose coordinates span existing masters.'
-		)
-	new_font.masters = surviving
-
-	# 3. Drop axes that collapsed to a single coordinate.
-	collapsed = {tag for tag, (lo, hi) in hull.items() if lo == hi}
-	if collapsed:
-		keep_idx = [i for i, tag in enumerate(axis_tags) if tag not in collapsed]
-		# Trim the axis-coordinate arrays on EVERY instance — including
-		# Variable Font Setting entries — so they stay structurally parallel
-		# to new_font.axes. Skipping VF Settings would leave them with N
-		# entries while the font advertises N-1 axes, desyncing Glyphs'
-		# export pipeline (Variable Font Setting referencing a phantom axis).
-		for master in new_font.masters:
-			master.axes = [master.axes[i] for i in keep_idx]
-		for inst in new_font.instances:
-			inst.axes = [inst.axes[i] for i in keep_idx]
-		new_font.axes = [ax for i, ax in enumerate(new_font.axes) if i in keep_idx]
-
-	# 4. Rewrite the family name (analogue of the OpenType name-table patch).
-	new_font.familyName = output_family_name
-
-	return new_font
-
-
-def save_gsfont_to_glyphs(gsfont, output_path, format_version=None):
-	"""Save a (clamped) GSFont to a ``.glyphs`` file without affecting the open document set.
-
-	When ``format_version`` is None the output inherits the source font's own
-	``formatVersion`` (so a Glyphs 2 source produces a Glyphs 2 file rather than
-	being silently upgraded to Glyphs 3 schema). Callers can pass an explicit
-	integer to override.
-	"""
-	if format_version is None:
-		# Inherit the source font's format version; default to 3 if unknown.
-		format_version = getattr(gsfont, 'formatVersion', None) or 3
-	# makeCopy=True writes a new file without changing the font's tracked file path.
-	gsfont.save(path=output_path, formatVersion=format_version, makeCopy=True)
-
-
-def _container_for_format(fmt):
-	"""Map a 'TTF'/'OTF'/'WOFF'/'WOFF2' string to a Glyphs export container constant."""
-	if not _GLYPHS_AVAILABLE:
-		return None
-	f = (fmt or '').upper()
-	if f == 'WOFF':
-		return WOFF
-	if f == 'WOFF2':
-		return WOFF2
-	return PLAIN  # TTF and OTF both use the PLAIN container
-
-
-def _outline_format_for(fmt):
-	"""Map a UI format string to the outline format Glyphs.generate() expects."""
-	f = (fmt or '').upper()
-	if f == 'TTF':
-		return 'TTF'
-	# OTF / WOFF / WOFF2 — Glyphs always writes the OTF outline; the WOFF
-	# wrappers are applied via the containers parameter.
-	return 'OTF'
-
-
-def export_gsfont_binary_via_glyphs(clamped_font, output_path, fmt):
-	"""Export a clamped GSFont as a Variable Font binary using Glyphs' own compiler.
-
-	Strategy: save the clamped font to a temp ``.glyphs`` file, open it
-	headlessly in Glyphs, add a Variable Font Setting if none exists, call
-	``GSInstance.generate(...)`` to produce the binary, then close and clean up.
-
-	The output is moved/renamed to ``output_path``.
-	"""
-	if not _GLYPHS_AVAILABLE:
-		raise RuntimeError(
-			f'GlyphsApp Python API not available: {_GLYPHS_IMPORT_ERROR}'
-		)
-
-	container = _container_for_format(fmt)
-	outline_fmt = _outline_format_for(fmt)
-	output_dir = os.path.dirname(output_path) or '.'
-	os.makedirs(output_dir, exist_ok=True)
-
-	tmp_dir = tempfile.mkdtemp(prefix='vfclamp-')
-	tmp_glyphs_path = os.path.join(tmp_dir, 'vfclamp-source.glyphs')
-	export_dir = os.path.join(tmp_dir, 'export')
-	os.makedirs(export_dir, exist_ok=True)
-
-	temp_doc = None
-	try:
-		save_gsfont_to_glyphs(clamped_font, tmp_glyphs_path)
-		# Open headlessly when supported (Glyphs 3.2+). On older builds that
-		# do not recognise the ``showInterface`` kwarg, Python raises TypeError;
-		# PyObjC may also raise NSInvalidArgumentException via ValueError.
-		# When we fall back to a visible open, we mark the doc for closure in
-		# the finally block so we don't strand a phantom temp window.
-		try:
-			temp_doc = Glyphs.open(tmp_glyphs_path, showInterface=False)
-		except (TypeError, ValueError):
-			temp_doc = Glyphs.open(tmp_glyphs_path)
-		if temp_doc is None:
-			raise RuntimeError(
-				'Glyphs.open() returned no document for temp source file. '
-				'Glyphs 3.2+ is recommended for the open-Glyphs-font path.'
-			)
-
-		# Find or create a Variable Font Setting.
-		vf_inst = next((i for i in temp_doc.instances if _is_variable_instance(i)), None)
-		if vf_inst is None:
-			vf_inst = GSInstance()
-			vf_inst.type = INSTANCETYPEVARIABLE
-			vf_inst.name = clamped_font.familyName or 'Variable'
-			temp_doc.instances.append(vf_inst)
-
-		# Build the kwarg dict so we can fall back gracefully on Glyphs <3.2
-		# where ``containers`` was not yet a recognised parameter.
-		generate_kwargs = dict(
-			format=outline_fmt,
-			fontPath=export_dir,
-			autoHint=True,
-			useProductionNames=True,
-		)
-		if container is not None:
-			generate_kwargs['containers'] = [container]
-		try:
-			ok = vf_inst.generate(**generate_kwargs)
-		except TypeError:
-			# Older Glyphs builds reject the ``containers`` kwarg.
-			generate_kwargs.pop('containers', None)
-			ok = vf_inst.generate(**generate_kwargs)
-		# Glyphs returns True (older builds) or a list of generated paths
-		# (newer builds) on success; a string on failure; falsy values
-		# (False, None) and NSError on hard failure.
-		if isinstance(ok, str):
-			raise RuntimeError(f'Glyphs export failed: {ok}')
-		if ok is False or ok is None:
-			raise RuntimeError(
-				'Glyphs export failed: GSInstance.generate returned no result. '
-				'Check the Glyphs Macro Panel for details.'
-			)
-
-		# Locate the freshly generated file. Glyphs writes one file with an
-		# extension matching the container/outline combination. We filter to
-		# the expected extension first so a stray .fea/.designspace/log can't
-		# masquerade as the output.
-		expected_ext = extension_for_format(fmt).lower()
-		generated = [
-			os.path.join(export_dir, name)
-			for name in os.listdir(export_dir)
-			if not name.startswith('.') and name.lower().endswith(expected_ext)
-		]
-		if not generated:
-			# Fall back to any non-dotfile so the user gets a file even if the
-			# extension is unexpected (older Glyphs may write .ttf for OTF).
-			generated = [
-				os.path.join(export_dir, name)
-				for name in os.listdir(export_dir)
-				if not name.startswith('.')
-			]
-		if not generated:
-			raise RuntimeError('Glyphs export wrote no file to the temp directory')
-		# Pick the most recently modified file in case Glyphs wrote auxiliary
-		# files alongside the main output.
-		generated.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-		shutil.move(generated[0], output_path)
-	finally:
-		# Close the temp document without prompting to save.
-		if temp_doc is not None:
-			try:
-				if hasattr(temp_doc, 'parent') and temp_doc.parent is not None:
-					temp_doc.parent.close()
-				elif hasattr(temp_doc, 'close'):
-					temp_doc.close()
-			except (AttributeError, RuntimeError):
-				pass
-		# Best-effort cleanup of the temp directory. ignore_errors=True already
-		# swallows OSError; no need for a second except wrapper.
-		shutil.rmtree(tmp_dir, ignore_errors=True)
+_sys.modules[__name__].__class__ = _CoreModuleProxy

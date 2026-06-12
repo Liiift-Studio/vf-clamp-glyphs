@@ -36,11 +36,13 @@ from AppKit import (
 
 # ---------------------------------------------------------------------------
 # Visual palette — small accent colors per axis, mirroring the website's
-# golden-angle hue system but tuned for legibility against macOS dark mode
-# panels. Values are sRGB 0..1 floats.
+# golden-angle hue system. Two variants: dark-mode (lighter, less saturated to
+# read against dark translucent panels) and light-mode (deeper to retain WCAG
+# contrast against off-white). Selected at render time via NSAppearance.
+# Values are sRGB 0..1 floats.
 # ---------------------------------------------------------------------------
 
-AXIS_COLORS = {
+AXIS_COLORS_DARK = {
 	'wght': (0.40, 0.66, 0.96),   # blue
 	'wdth': (0.42, 0.78, 0.52),   # green
 	'opsz': (0.66, 0.55, 0.92),   # purple
@@ -48,12 +50,49 @@ AXIS_COLORS = {
 	'ital': (0.96, 0.55, 0.76),   # pink
 	'GRAD': (0.95, 0.86, 0.45),   # yellow
 }
-DEFAULT_AXIS_COLOR = (0.60, 0.60, 0.60)
+AXIS_COLORS_LIGHT = {
+	'wght': (0.10, 0.36, 0.78),   # blue
+	'wdth': (0.10, 0.50, 0.22),   # green
+	'opsz': (0.36, 0.18, 0.72),   # purple
+	'slnt': (0.78, 0.36, 0.06),   # orange
+	'ital': (0.74, 0.20, 0.46),   # pink
+	'GRAD': (0.62, 0.46, 0.04),   # yellow
+}
+# Back-compat alias — older docstrings reference AXIS_COLORS.
+AXIS_COLORS = AXIS_COLORS_DARK
+DEFAULT_AXIS_COLOR_DARK = (0.60, 0.60, 0.60)
+DEFAULT_AXIS_COLOR_LIGHT = (0.30, 0.30, 0.30)
+DEFAULT_AXIS_COLOR = DEFAULT_AXIS_COLOR_DARK
+
+
+def _is_dark_appearance():
+	"""Return True when the current effective appearance is a Dark Aqua variant."""
+	try:
+		from AppKit import NSApp, NSAppearanceNameDarkAqua
+		appearance = NSApp().effectiveAppearance() if NSApp() is not None else None
+		if appearance is None:
+			return True
+		match = appearance.bestMatchFromAppearancesWithNames_([NSAppearanceNameDarkAqua])
+		return match == NSAppearanceNameDarkAqua
+	except (AttributeError, ImportError, RuntimeError):
+		# Default to dark — historical Glyphs default and least-bad fallback.
+		return True
 
 
 def _nscolor_for_axis(tag):
-	"""Return an NSColor for the small chip that sits next to ``tag`` in the hull preview."""
-	rgb = AXIS_COLORS.get(tag, DEFAULT_AXIS_COLOR)
+	"""Return an NSColor for the small chip that sits next to ``tag`` in the hull preview.
+
+	Picks the dark- or light-mode palette to maintain contrast in both
+	system appearances. Falls back to the dark palette if appearance lookup
+	fails (matches Glyphs' historical default).
+	"""
+	if _is_dark_appearance():
+		palette = AXIS_COLORS_DARK
+		default = DEFAULT_AXIS_COLOR_DARK
+	else:
+		palette = AXIS_COLORS_LIGHT
+		default = DEFAULT_AXIS_COLOR_LIGHT
+	rgb = palette.get(tag, default)
 	return NSColor.colorWithSRGBRed_green_blue_alpha_(rgb[0], rgb[1], rgb[2], 1.0)
 
 # Make Resources/ importable so this file can pull in its sibling core.py
@@ -214,8 +253,11 @@ class VFClampDialog:
 	def __init__(self):
 		"""Initialise dialog state. Window is shown by show()."""
 		self._font_path = None
+		# Parsed TTFont cache populated by _load_font and reused by
+		# _refresh_axis_preview so checkbox toggles don't re-parse the disk file.
+		self._cached_font = None
 		self._instance_names = []   # ordered list from fvar OR gsfont
-		self._checks = []           # list of (attr_name, inner_group) tuples
+		self._checks = []           # list of CheckBox widgets (parallel to _instance_names)
 		self._name_overridden = False
 		# Phase 1+2: source can be a file on disk or a currently-open GSFont.
 		self._source_mode = self.SOURCE_FILE
@@ -231,11 +273,15 @@ class VFClampDialog:
 		# open; this matches the canonical workflow of "I have my font open,
 		# clamp it" without an extra mode-toggle click. Falls back to "File"
 		# when no Glyphs documents are open.
+		# Initial transition does not clear inactive state — nothing is loaded
+		# yet, so there is nothing to clear; passing clear_inactive=False also
+		# avoids a spurious gsfontPopup.set(0) before the popup has the right
+		# items in place. (Issue #44.)
 		if self._gsfont_options:
-			self._set_source_mode_ui(self.SOURCE_GSFONT)
+			self._transition_source_mode(self.SOURCE_GSFONT, clear_inactive=False)
 			self._auto_select_frontmost_gsfont()
 		else:
-			self._set_source_mode_ui(self.SOURCE_FILE)
+			self._transition_source_mode(self.SOURCE_FILE, clear_inactive=False)
 
 	# ------------------------------------------------------------------
 	# Window construction
@@ -264,6 +310,16 @@ class VFClampDialog:
 			minSize=(w, 360),
 			maxSize=(w, 1200),
 		)
+		# Persist window position across launches. setFrameAutosaveName_ is
+		# AppKit's documented mechanism for restoring user-positioned windows;
+		# vanilla.Window doesn't accept it as a kwarg in older builds, so we
+		# apply it to the underlying NSWindow.
+		try:
+			nswin = self.w.getNSWindow() if hasattr(self.w, 'getNSWindow') else self.w._window
+			if nswin is not None:
+				nswin.setFrameAutosaveName_('com.liiift.vf-clamp.dialog')
+		except (AttributeError, RuntimeError):
+			pass
 		win = self.w
 		PAD = self.PAD
 		LABEL_H = self.LABEL_H
@@ -309,6 +365,17 @@ class VFClampDialog:
 			[self._GSFONT_POPUP_EMPTY],
 			callback=self._on_gsfont_chosen,
 		)
+		# Accessibility: name file path field and gsfont popup explicitly so
+		# VoiceOver reads them in context rather than as anonymous controls.
+		for widget, ax_label in (
+			(win.fontPathField, 'Selected font file path'),
+			(win.browseButton, 'Browse for a variable font file'),
+			(win.gsfontPopup, 'Open Glyphs font'),
+		):
+			try:
+				widget._nsObject.setAccessibilityLabel_(ax_label)
+			except (AttributeError, RuntimeError):
+				pass
 		# Initial visibility is set by _set_source_mode_ui after the build.
 		y += ROW + 8
 
@@ -331,9 +398,9 @@ class VFClampDialog:
 			(-PAD - 64, y - 2, 64, BTN_H), 'Invert',
 			callback=self._on_select_invert, sizeStyle='small',
 		)
-		# Accessibility: VoiceOver reads short labels like 'All' as ambiguous
-		# without context. Set explicit accessibility labels that name the
-		# scope ("instances") so screen-reader users know what these affect.
+		# Accessibility + tooltips: VoiceOver reads short labels like 'All'
+		# as ambiguous without context; sighted users also benefit from a
+		# tooltip explaining the abbreviated scope.
 		for btn_widget, ax_label in (
 			(win.allBtn, 'Select all instances'),
 			(win.noneBtn, 'Deselect all instances'),
@@ -341,6 +408,19 @@ class VFClampDialog:
 		):
 			try:
 				btn_widget._nsObject.setAccessibilityLabel_(ax_label)
+			except (AttributeError, RuntimeError):
+				pass
+			try:
+				btn_widget._nsObject.setToolTip_(ax_label)
+			except (AttributeError, RuntimeError):
+				pass
+		# Bulk-select buttons are meaningless without an instance list — keep
+		# them hidden until _populate_instance_checks runs. Avoids dead
+		# affordances that surface a stale "click All" before any font is
+		# loaded.
+		for btn_widget in (win.allBtn, win.noneBtn, win.invertBtn):
+			try:
+				btn_widget.show(False)
 			except (AttributeError, RuntimeError):
 				pass
 		y += LABEL_H + 6
@@ -364,6 +444,14 @@ class VFClampDialog:
 			autohidesScrollers=True,
 		)
 		win.instanceScroll.show(False)
+		# Accessibility: name the scroll region so VoiceOver announces
+		# "Named instances, scroll area" instead of an anonymous scroll view.
+		try:
+			win.instanceScroll._nsObject.setAccessibilityLabel_(
+				'Named instances'
+			)
+		except (AttributeError, RuntimeError):
+			pass
 		y += LABEL_H + 8
 
 		# --- Row 5: Hull preview (colored axis chips) ------------------
@@ -465,6 +553,20 @@ class VFClampDialog:
 		)
 		win.revealButton.enable(False)
 		win.revealButton.show(False)  # appears only after a successful generate
+		# Tooltip + accessibility label so 'Reveal' isn't ambiguous in
+		# isolation (reveal what, where?).
+		for widget, ax_label in (
+			(win.revealButton, 'Reveal the generated font in Finder'),
+			(win.folderButton, 'Choose the output folder'),
+		):
+			try:
+				widget._nsObject.setAccessibilityLabel_(ax_label)
+			except (AttributeError, RuntimeError):
+				pass
+			try:
+				widget._nsObject.setToolTip_(ax_label)
+			except (AttributeError, RuntimeError):
+				pass
 		self._last_output_path = None
 
 		# Spinner + status on the left
@@ -589,6 +691,12 @@ class VFClampDialog:
 		AppKit attribute errors are tolerated here so a partially-built window
 		(e.g. during construction before _build_window finishes) cannot crash
 		mode transitions.
+
+		This method is the *visibility-only* leaf. For a full source-mode
+		transition (clearing the inactive source's path/gsfont, resetting
+		the default output folder, etc.) call ``_transition_source_mode``
+		instead — it routes back through here after handling cross-source
+		state. See issue #44.
 		"""
 		is_file = (mode == self.SOURCE_FILE)
 		try:
@@ -603,6 +711,67 @@ class VFClampDialog:
 		self._source_mode = mode
 		self._refresh_format_popup()
 
+	@objc.python_method
+	def _transition_source_mode(self, mode, *, clear_inactive=True, reset_folder=False):
+		"""Switch ``_source_mode`` to ``mode`` and clear stale cross-source state.
+
+		Centralised transition (issue #44) — every place that needs to change
+		the active source funnels through here so checkbox state, file paths,
+		gsfont references, hull preview, and the default output folder cannot
+		drift out of sync with the visible widget set.
+
+		Arguments:
+
+		``clear_inactive`` (default True)
+			Wipe the *other* source's pointer (``_gsfont`` when switching to
+			file mode, ``_font_path`` when switching to gsfont mode) so a
+			subsequent generate call cannot accidentally use a stale source
+			the user has visually navigated away from. Set False when the
+			caller is itself about to populate the inactive source (e.g. the
+			__init__ default).
+
+		``reset_folder`` (default False)
+			Blank the output-folder field so the next load picks a default
+			rooted in the *new* source's folder rather than carrying the
+			previous source's path. Callers that want to preserve a user's
+			explicit folder pick set this False.
+		"""
+		# Always flip the visibility + format popup first so a downstream
+		# refresh sees the correct widget set.
+		self._set_source_mode_ui(mode)
+
+		if clear_inactive:
+			if mode == self.SOURCE_FILE:
+				# Switching INTO file mode → drop the gsfont reference. The
+				# gsfont popup is also reset to its sentinel so the visible
+				# selection matches the cleared state.
+				self._gsfont = None
+				try:
+					self.w.gsfontPopup.set(0)
+				except (AttributeError, RuntimeError):
+					pass
+			else:
+				# Switching INTO gsfont mode → drop the file-path reference
+				# and blank the field so the user sees the source has changed.
+				self._font_path = None
+				# Release the cached TTFont from the previous file-mode session
+				# — keeping it would leak the parsed tables and pin the disk
+				# file open until the dialog is closed.
+				try:
+					self._close_cached_font()
+				except AttributeError:
+					pass
+				try:
+					self.w.fontPathField.set('')
+				except (AttributeError, RuntimeError):
+					pass
+
+		if reset_folder:
+			try:
+				self.w.folderField.set('')
+			except (AttributeError, RuntimeError):
+				pass
+
 	def _on_source_radio_changed(self, sender):
 		"""User toggled the Source: Open Font / File radio."""
 		idx = self.w.sourceRadio.get()
@@ -614,17 +783,17 @@ class VFClampDialog:
 				self._set_status(
 					'No Glyphs fonts are currently open. Switch back to File or open one.',
 				)
-				self._set_source_mode_ui(self.SOURCE_GSFONT)
-				# Clear any prior gsfont selection — there's nothing to clamp.
-				self._gsfont = None
+				# Even with no candidates we still transition so the UI matches
+				# the radio click. The transition clears any stale file path so
+				# the user's next move starts from a clean slate.
+				self._transition_source_mode(self.SOURCE_GSFONT)
 				return
-			self._set_source_mode_ui(self.SOURCE_GSFONT)
+			self._transition_source_mode(self.SOURCE_GSFONT)
 			# Auto-select the most likely target so the user doesn't have to
 			# poke the popup as a second action.
 			self._auto_select_frontmost_gsfont()
 		else:  # File
-			self._set_source_mode_ui(self.SOURCE_FILE)
-			self._gsfont = None
+			self._transition_source_mode(self.SOURCE_FILE)
 			self._set_status('')
 
 	def _on_cancel(self, sender):
@@ -718,11 +887,15 @@ class VFClampDialog:
 			)
 			return
 
+		# Route through the centralised transition (issue #44) so the file-side
+		# source is cleared and the visible widget set switches in one step.
+		# We then assign _gsfont AFTER the transition because _transition_source_mode
+		# clears the inactive source's pointer; setting _gsfont last anchors the
+		# just-loaded reference. _font_path is cleared by the transition so a
+		# stale file path can't survive into the next generate dispatch.
+		self._transition_source_mode(self.SOURCE_GSFONT)
 		self._gsfont = gsfont
-		# Don't clear self._font_path — the user may switch back to file mode via Browse.
 		self._instance_names = names
-		# Setter handles both _source_mode AND widget visibility + format popup.
-		self._set_source_mode_ui(self.SOURCE_GSFONT)
 		self._populate_instance_checks(names)
 		self._name_overridden = False
 		self._refresh_name()
@@ -749,10 +922,44 @@ class VFClampDialog:
 			self._name_overridden = True
 
 	def _on_check_toggled(self, sender):
-		"""Update output name, axis preview, and Generate button state on toggle."""
-		self._refresh_name()
-		self._refresh_axis_preview()
-		self._refresh_generate_button()
+		"""Update output name, axis preview, and Generate button state on toggle.
+
+		Walks ``self._checks`` ONCE per toggle and threads the resulting selection
+		list through every downstream refresh — without this, a single click
+		incurs four O(N) bridge walks through the checkbox list (one per
+		refresh helper) plus a font re-parse in the axis preview.
+		"""
+		selected = self._selected_instance_names()
+		self._refresh_name(selected=selected)
+		self._refresh_axis_preview(selected=selected)
+		self._refresh_generate_button(selected=selected)
+		self._refresh_selection_count(selected=selected)
+
+	@objc.python_method
+	def _refresh_selection_count(self, selected=None):
+		"""Update the Instances label with an 'N of M' count of selected rows.
+
+		Keeps the label terse — 'Instances (3/8):' rather than a separate
+		status line — so the bottom status label remains free for transient
+		messages (Generating…, Saved:…, Error:…). Callers that have already
+		computed the selection list can pass it via ``selected`` to avoid a
+		second walk through the checkbox list.
+		"""
+		if not self._instance_names:
+			# Reset to bare label when there are no instances yet
+			try:
+				self.w.instanceLabel.set('Instances:')
+			except (AttributeError, RuntimeError):
+				pass
+			return
+		if selected is None:
+			selected = self._selected_instance_names()
+		count = len(selected)
+		total = len(self._instance_names)
+		try:
+			self.w.instanceLabel.set(f'Instances ({count}/{total}):')
+		except (AttributeError, RuntimeError):
+			pass
 
 	def _on_select_all(self, sender):
 		"""Tick every named-instance checkbox."""
@@ -779,58 +986,110 @@ class VFClampDialog:
 		except Exception:
 			pass
 
-	def _on_generate(self, sender):
-		"""Read UI state, then dispatch to file- or gsfont-source generator."""
+	@objc.python_method
+	def _resolve_selected_format(self):
+		"""Read the Format popup and normalise the label to an internal token.
+
+		Returns one of the internal format tokens ('TTF', 'OTF', 'WOFF',
+		'WOFF2', 'GLYPHS'). The popup displays '.glyphs' for source output;
+		this helper maps the user-facing label to the internal 'GLYPHS' token
+		so downstream code only ever sees uppercase tokens.
+		"""
+		try:
+			fmt_items = self.w.formatPopup.getItems()
+			fmt_index = self.w.formatPopup.get()
+		except (AttributeError, RuntimeError):
+			return 'TTF'
+		fmt_label = fmt_items[fmt_index] if fmt_items else 'TTF'
+		return 'GLYPHS' if fmt_label == self.GSFONT_FORMAT_LABEL else fmt_label
+
+	@objc.python_method
+	def _validate_brotli_for_format(self, fmt):
+		"""Return an error message for WOFF2 output without brotli, else None.
+
+		Extracted (issue #59) so the WOFF2/brotli check stops entangling the
+		generate dispatcher with backend capability detection. Callers ask
+		"is this format viable right now?" and decide what to do with the
+		answer (status message, popup change, etc.).
+		"""
+		if flavor_for_format(fmt) != 'woff2':
+			return None
+		try:
+			import brotli  # noqa: F401
+		except ImportError:
+			return (
+				'WOFF2 output requires the brotli package; install it or '
+				'pick WOFF/TTF/OTF.'
+			)
+		return None
+
+	@objc.python_method
+	def _collect_generate_inputs(self):
+		"""Read every dialog input needed by generate; return params or an error.
+
+		Returns a tuple ``(params, error_message)`` where exactly one element
+		is non-None. ``params`` is a dict with keys ``selected``, ``family_name``,
+		``fmt``, ``output_path`` ready to hand to a generator. ``error_message``
+		is a single string the caller surfaces verbatim via _set_status.
+
+		Extracted (issue #59) so _on_generate stops being a god-method that
+		also owns validation, normalisation, brotli probing, and folder
+		fallback logic.
+		"""
 		selected = self._selected_instance_names()
 		if not selected:
-			self._set_status('Select at least one named instance.', error=True)
-			return
+			return None, 'Select at least one named instance.'
 
 		family_name = self.w.nameField.get().strip()
 		if not family_name:
-			self._set_status('Enter an output name.', error=True)
-			return
+			return None, 'Enter an output name.'
 
-		fmt_items = self.w.formatPopup.getItems()
-		fmt_index = self.w.formatPopup.get()
-		fmt_label = fmt_items[fmt_index] if fmt_items else 'TTF'
-		# Normalise the display label '.glyphs' to the internal token 'GLYPHS'.
-		fmt = 'GLYPHS' if fmt_label == self.GSFONT_FORMAT_LABEL else fmt_label
+		fmt = self._resolve_selected_format()
 		ext = extension_for_format(fmt)
 
 		# Cross-source sanity check: .glyphs output requires an open-font source.
 		if fmt == 'GLYPHS' and self._source_mode != self.SOURCE_GSFONT:
-			self._set_status(
-				'.glyphs output requires using an open Glyphs font as the source.',
-				error=True,
-			)
-			return
+			return None, '.glyphs output requires using an open Glyphs font as the source.'
 
-		if flavor_for_format(fmt) == 'woff2':
-			# brotli is required for both the fontTools path (we call it
-			# directly via partial.save) AND defensively for the Glyphs-native
-			# pipeline on builds where Glyphs forwards to fontTools internally.
-			# Probing here surfaces a targeted hint instead of a deep traceback.
-			try:
-				import brotli  # noqa: F401
-			except ImportError:
-				self._set_status(
-					'WOFF2 output requires the brotli package; install it or pick WOFF/TTF/OTF.',
-					error=True,
-				)
-				return
+		brotli_err = self._validate_brotli_for_format(fmt)
+		if brotli_err is not None:
+			return None, brotli_err
 
 		folder = self.w.folderField.get().strip()
 		if not folder:
 			folder = self._default_output_folder()
-
 		output_path = safe_output_path(folder, family_name, ext)
 
-		# Dispatch to the appropriate generator.
+		return {
+			'selected': selected,
+			'family_name': family_name,
+			'fmt': fmt,
+			'output_path': output_path,
+		}, None
+
+	def _on_generate(self, sender):
+		"""Validate dialog input, then dispatch to the right source-path generator.
+
+		Reduced (issue #59) to two responsibilities: collect-or-error, and
+		dispatch. Each previously-inlined concern (selection check, name
+		check, format normalisation, brotli probe, folder fallback,
+		output-path safety) lives in its own helper above.
+		"""
+		params, err = self._collect_generate_inputs()
+		if err is not None:
+			self._set_status(err, error=True)
+			return
+
+		# Dispatch to the appropriate generator. Both paths share the same
+		# UI lifecycle via _begin_generate_ui (issue #58).
 		if self._source_mode == self.SOURCE_GSFONT:
-			self._generate_from_gsfont(selected, family_name, fmt, output_path)
+			self._generate_from_gsfont(
+				params['selected'], params['family_name'], params['fmt'], params['output_path'],
+			)
 		else:
-			self._generate_from_file(selected, family_name, fmt, output_path)
+			self._generate_from_file(
+				params['selected'], params['family_name'], params['fmt'], params['output_path'],
+			)
 
 	@objc.python_method
 	def _default_output_folder(self):
@@ -847,20 +1106,45 @@ class VFClampDialog:
 		return os.path.expanduser('~/Desktop')
 
 	@objc.python_method
-	def _generate_from_file(self, selected, family_name, fmt, output_path):
-		"""File-source path — uses fontTools instancer in a worker thread (unchanged)."""
-		font_path = self._font_path
+	def _begin_generate_ui(self):
+		"""Spin up the shared 'Generate is in flight' UI state.
+
+		Extracted (issue #58) so the two source-path dispatchers don't
+		each copy the same five-line spinner/Generate/Reveal/disable block.
+		The two paths still use different concurrency models — the file path
+		runs in a worker thread, the gsfont path stays on the main thread
+		because Glyphs APIs require it — but the *UI* lifecycle is identical
+		and now lives in one place.
+
+		Resets the cancellation flag too so a prior Cancel click doesn't
+		short-circuit this generate.
+		"""
+		self._cancelled = False
 		self._set_status('Generating…')
-		self.w.generateButton.enable(False)
-		self.w.revealButton.enable(False)
+		try:
+			self.w.generateButton.enable(False)
+			self.w.revealButton.enable(False)
+		except (AttributeError, RuntimeError):
+			pass
 		try:
 			self.w.spinner.start()
-		except Exception:
+		except (AttributeError, RuntimeError):
 			pass
 
-		# Reset the cancellation flag at the start of each generate so a
-		# prior Cancel click doesn't short-circuit this one.
-		self._cancelled = False
+	@objc.python_method
+	def _generate_from_file(self, selected, family_name, fmt, output_path):
+		"""File-source path — uses fontTools instancer in a worker thread.
+
+		Concurrency note (issue #58): we deliberately run fontTools in a
+		background thread here. The fontTools instancer is pure-Python /
+		fontTools and does not require the main runloop, so blocking the
+		dialog would be a UX regression. The companion gsfont path stays on
+		the main thread because Glyphs' Python API is main-thread-only.
+		Both paths share the same _begin_generate_ui / _on_generate_success
+		/ _on_generate_failure UI lifecycle.
+		"""
+		font_path = self._font_path
+		self._begin_generate_ui()
 		dialog_ref = self
 
 		def _run():
@@ -897,23 +1181,23 @@ class VFClampDialog:
 		For ``.glyphs`` output we just clamp + save. For binary outputs we route
 		through Glyphs' native export pipeline (Variable Font Setting + generate).
 
-		We defer the actual heavy work to the next runloop tick via
-		``AppHelper.callAfter`` so the spinner.start() / Generating… status
-		updates can paint before the main thread blocks inside Glyphs.open and
-		GSInstance.generate.
+		Concurrency note (issue #58): we deliberately stay on the main thread
+		here. Glyphs' Python scripting API is not thread-safe — calling
+		``Glyphs.open`` or ``GSInstance.generate`` from a background thread
+		races with NSDocument internals and crashes the app. We defer the
+		heavy work to the next runloop tick via ``AppHelper.callAfter`` so
+		the spinner and status label paint before the main thread blocks.
+
+		The companion file path runs in a worker thread because fontTools is
+		main-thread-agnostic. Both paths share the same _begin_generate_ui /
+		_on_generate_success / _on_generate_failure UI lifecycle.
 		"""
 		gsfont = self._gsfont
 		if gsfont is None:
 			self._set_status('No open Glyphs font selected.', error=True)
 			return
 
-		self._set_status('Generating…')
-		self.w.generateButton.enable(False)
-		self.w.revealButton.enable(False)
-		try:
-			self.w.spinner.start()
-		except (AttributeError, RuntimeError):
-			pass
+		self._begin_generate_ui()
 
 		# Defer the long Glyphs.open / generate sequence so the spinner and
 		# status label paint before the main thread blocks. Without this,
@@ -1030,16 +1314,24 @@ class VFClampDialog:
 			self._set_status(f'Unexpected error: {e}', error=True)
 			return
 
+		# Route through the centralised transition (issue #44). It clears the
+		# gsfont reference, resets the gsfont popup to its sentinel, and flips
+		# widget visibility — replacing the ad-hoc setattr+setter pair this
+		# function used to do inline.
+		self._transition_source_mode(self.SOURCE_FILE)
 		self._font_path = path
 		self._instance_names = names
-		# Switch back to file source mode and undo any prior gsfont selection.
-		self._gsfont = None
+		# Cache the parsed TTFont so subsequent checkbox toggles can read fvar
+		# axis hulls without re-opening the disk file and re-parsing fontTools
+		# tables. The cache is keyed by path; switching to a different font
+		# clears it via _close_cached_font.
+		self._close_cached_font()
 		try:
-			self.w.gsfontPopup.set(0)  # reset to sentinel
+			self._cached_font = open_font_safely(path)
 		except Exception:
-			pass
-		# Setter handles both _source_mode AND widget visibility + format popup.
-		self._set_source_mode_ui(self.SOURCE_FILE)
+			# Fall through silently: _refresh_axis_preview re-opens on demand
+			# when the cache is None.
+			self._cached_font = None
 		self.w.fontPathField.set(path)
 		self._set_status('')
 		self._populate_instance_checks(names)
@@ -1053,9 +1345,42 @@ class VFClampDialog:
 		self._refresh_generate_button()
 
 	@objc.python_method
+	def _close_cached_font(self):
+		"""Release the cached TTFont so the next ``_load_font`` reads fresh.
+
+		Best-effort — fontTools' TTFont does not require explicit close, but
+		dropping the reference lets the garbage collector reclaim the parsed
+		tables immediately when the user switches fonts.
+		"""
+		cached = getattr(self, '_cached_font', None)
+		if cached is None:
+			return
+		try:
+			close = getattr(cached, 'close', None)
+			if callable(close):
+				close()
+		except (AttributeError, OSError, RuntimeError):
+			pass
+		self._cached_font = None
+
+	@objc.python_method
 	def _populate_instance_checks(self, names):
-		"""Build one CheckBox per named instance inside a scrollable Group."""
+		"""Build one CheckBox per named instance inside a scrollable Group.
+
+		Holds the CheckBox widgets in ``self._checks`` (a flat list parallel to
+		``self._instance_names``). Vanilla still requires the widgets to be
+		attached to their parent Group as named attributes so that AppKit retains
+		them and the document view's autorelease pool sees them, but the names
+		are an internal implementation detail — public iteration goes through
+		the list, never ``getattr``.
+		"""
 		self.w.instancePlaceholder.show(False)
+		# Surface the bulk-select helpers now that we have something to select.
+		for btn_widget in (self.w.allBtn, self.w.noneBtn, self.w.invertBtn):
+			try:
+				btn_widget.show(True)
+			except (AttributeError, RuntimeError):
+				pass
 
 		n = len(names)
 		check_row = self.CHECK_H + self.CHECK_GAP
@@ -1070,46 +1395,58 @@ class VFClampDialog:
 		self._checks = []
 		for idx, name in enumerate(names):
 			y = self.CHECK_GAP + idx * check_row
-			attr = f'_cb_{idx}'
 			cb = vanilla.CheckBox(
 				(8, y, group_width - 16, self.CHECK_H),
 				name,
 				value=False,
 				callback=self._on_check_toggled,
 			)
-			setattr(inner_group, attr, cb)
-			self._checks.append((attr, inner_group))
+			# Attach to the parent group so AppKit retains the widget. The
+			# attribute name is local to this build only — never read elsewhere.
+			setattr(inner_group, f'_cb_{idx}', cb)
+			self._checks.append(cb)
 
 		self._inner_group = inner_group
 
-		# Rebuild the ScrollView with the inner group as its document view —
-		# the previous setDocumentView_ via munged selector was unreliable.
+		# Reset the previous document view's frame so AppKit can release it;
+		# without this the NSClipView keeps a strong reference to the old
+		# document view and memory grows on every font reload.
 		try:
-			self.w.instanceScroll._nsObject.setDocumentView_(inner_group._nsObject)
+			scroll_ns = self.w.instanceScroll._nsObject
+			old_doc = scroll_ns.documentView()
+			if old_doc is not None and old_doc is not inner_group._nsObject:
+				old_doc.removeFromSuperview()
+			scroll_ns.setDocumentView_(inner_group._nsObject)
 		except Exception:
-			# Last-resort: drop and recreate the ScrollView
+			# Last-resort: leave previous doc view in place rather than crash.
 			pass
 
 		self.w.instanceScroll.setPosSize(
 			(self.PAD, self._scroll_top_y, -self.PAD, scroll_h)
 		)
 		self.w.instanceScroll.show(True)
+		# Surface the initial 0/N count.
+		self._refresh_selection_count()
 
 		new_h = self._compute_window_height(n)
-		self.w.resize(self.W, new_h)
+		# Only call resize when the height actually changes — vanilla.resize
+		# triggers a real AppKit layout pass even when the size is unchanged.
+		try:
+			current_size = self.w.getPosSize()
+			current_h = current_size[3] if len(current_size) >= 4 else None
+		except (AttributeError, RuntimeError):
+			current_h = None
+		if current_h != new_h:
+			self.w.resize(self.W, new_h)
 
 	# ------------------------------------------------------------------
 	# Helpers
 	# ------------------------------------------------------------------
 
 	def _iter_checks(self):
-		"""Yield every CheckBox widget bound to the inner group."""
-		if not hasattr(self, '_inner_group'):
-			return
-		for attr, group in self._checks:
-			cb = getattr(group, attr, None)
-			if cb is not None:
-				yield cb
+		"""Yield every CheckBox widget."""
+		for cb in self._checks:
+			yield cb
 
 	def _set_all_checks(self, value):
 		"""Set every checkbox to ``value`` and refresh dependent UI."""
@@ -1119,22 +1456,25 @@ class VFClampDialog:
 
 	def _selected_instance_names(self):
 		"""Return names of instances whose checkbox is ticked."""
-		if not hasattr(self, '_inner_group'):
+		if not self._checks:
 			return []
 		selected = []
-		for idx, name in enumerate(self._instance_names):
-			attr = f'_cb_{idx}'
-			cb = getattr(self._inner_group, attr, None)
+		for name, cb in zip(self._instance_names, self._checks):
 			if cb and cb.get():
 				selected.append(name)
 		return selected
 
 	@objc.python_method
-	def _refresh_name(self):
-		"""Auto-compute the output name unless the user has overridden it."""
+	def _refresh_name(self, selected=None):
+		"""Auto-compute the output name unless the user has overridden it.
+
+		Callers that already walked the checkbox list can pass ``selected`` to
+		avoid an extra O(N) bridge walk.
+		"""
 		if self._name_overridden:
 			return
-		selected = self._selected_instance_names()
+		if selected is None:
+			selected = self._selected_instance_names()
 		if not selected:
 			self.w.nameField.set('')
 			return
@@ -1147,9 +1487,15 @@ class VFClampDialog:
 		self.w.nameField.set(computed.strip())
 
 	@objc.python_method
-	def _refresh_axis_preview(self):
-		"""Render the axis hull as colored ■-prefixed chips, one axis per line."""
-		selected = self._selected_instance_names()
+	def _refresh_axis_preview(self, selected=None):
+		"""Render the axis hull as colored ■-prefixed chips, one axis per line.
+
+		Uses the parsed TTFont cached by ``_load_font`` rather than re-parsing
+		the disk file on every checkbox toggle. Callers that already computed
+		the selection list can pass it via ``selected``.
+		"""
+		if selected is None:
+			selected = self._selected_instance_names()
 		if not selected:
 			self._set_hull_text('(select instances to preview)')
 			return
@@ -1159,9 +1505,14 @@ class VFClampDialog:
 			if self._source_mode == self.SOURCE_GSFONT and self._gsfont is not None:
 				hull = compute_gsfont_hull(self._gsfont, selected)
 			elif self._font_path:
-				import contextlib as _cl
-				with _cl.closing(open_font_safely(self._font_path)) as f:
-					hull = get_axis_hull_from_instances(f, selected)
+				cached = getattr(self, '_cached_font', None)
+				if cached is not None:
+					hull = get_axis_hull_from_instances(cached, selected)
+				else:
+					# Fallback for callers that bypass _load_font's cache populate.
+					import contextlib as _cl
+					with _cl.closing(open_font_safely(self._font_path)) as f:
+						hull = get_axis_hull_from_instances(f, selected)
 			else:
 				self._set_hull_text('(load a font to preview)')
 				return
@@ -1238,6 +1589,25 @@ class VFClampDialog:
 				parts.append(f'{tag} {a}' if a == b else f'{tag} {a}–{b}')
 			self.w.axisPreview.set('  ·  '.join(parts))
 
+		# Accessibility: VoiceOver would otherwise read the leading "■"
+		# as "black square" for every axis. Expose a clean axis-by-axis
+		# summary as the accessibility value instead (the colored chip is
+		# a redundant visual cue — WCAG 1.4.1 prohibits color-only encoding).
+		ax_parts = []
+		for tag, (lo, hi) in hull.items():
+			a = f'{lo:g}'
+			b = f'{hi:g}'
+			if a == b:
+				ax_parts.append(f'{tag} pinned at {a}')
+			else:
+				ax_parts.append(f'{tag} {a} to {b}')
+		ax_summary = '; '.join(ax_parts) if ax_parts else 'No axes'
+		try:
+			self.w.axisPreview._nsObject.setAccessibilityLabel_('Axis hull')
+			self.w.axisPreview._nsObject.setAccessibilityValue_(ax_summary)
+		except (AttributeError, RuntimeError):
+			pass
+
 	@objc.python_method
 	def _set_hull_text(self, text):
 		"""Set the hull preview to plain placeholder/error text in muted style."""
@@ -1253,13 +1623,19 @@ class VFClampDialog:
 		except Exception:
 			self.w.axisPreview.set(text)
 
-	def _refresh_generate_button(self):
-		"""Enable Generate only when a source is loaded and >=1 instance selected."""
+	def _refresh_generate_button(self, selected=None):
+		"""Enable Generate only when a source is loaded and >=1 instance selected.
+
+		Callers that already walked the checkbox list can pass ``selected`` to
+		avoid an extra O(N) bridge walk.
+		"""
 		source_loaded = (
 			self._font_path is not None
 			or (self._source_mode == self.SOURCE_GSFONT and self._gsfont is not None)
 		)
-		enabled = bool(source_loaded and self._selected_instance_names())
+		if selected is None:
+			selected = self._selected_instance_names()
+		enabled = bool(source_loaded and selected)
 		self.w.generateButton.enable(enabled)
 
 	@objc.python_method
