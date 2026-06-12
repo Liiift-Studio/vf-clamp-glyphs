@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-06-11
+
+Follow-up release addressing the 20 deferred findings from the 1.1.1 panel
+review — architectural separation, font correctness on edge cases, and
+controller-panel UX items deferred from the initial fix pass.
+
+### Added
+
+- `formats.py` module — central registry of output formats so dispatch logic
+  lives in one file instead of being threaded through `core.py` and `plugin.py`.
+- `gsfont_core.py` module — extracted GSFont (Glyphs.app source) helpers from
+  `core.py` into their own subsystem so the fontTools binary path and the
+  Glyphs-app object path are no longer entangled.
+- `tests/test_coverage_gaps.py` — 380 lines of additional tests covering
+  previously-untested branches in `core.py`, `plugin.py`, and the new
+  `gsfont_core.py` / `formats.py` modules.
+
+### Changed
+
+- `core.py` refactored to delegate GSFont-specific work to `gsfont_core.py`
+  and format-specific work to `formats.py`; module shrinks accordingly.
+- `plugin.py` reorganised around the new module split for clearer flow.
+- `scripts/build-zip.sh` updated to bundle the new modules and exclude
+  pre-built `vf-clamp-glyphs.zip` / `.sha256` from the source tree.
+
+### Fixed
+
+- 20 deferred findings from the 1.1.1 panel review covering architectural
+  separation, font correctness on edge cases (round-trip / collapsed axes),
+  and UX improvements in the controller panel.
+
 ## [1.1.1] — 2026-06-11
 
 This release lands the targeted fixes from a 10-engineer panel review of the
