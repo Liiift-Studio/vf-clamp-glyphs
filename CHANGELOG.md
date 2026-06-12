@@ -1,5 +1,72 @@
 # Changelog
 
+## [1.2.0] — 2026-06-12
+
+Major UX release. The dialog is restructured into a clear three-zone
+layout (Source / Instances + Hull / Output) with a new instance list,
+a graphical hull preview, persistent presets, recent-folders MRU, and
+drag-and-drop font loading. Build-zip and version-parity tooling were
+tightened in lockstep.
+
+### Added
+
+- **Three-zone dialog restructure.** The window is reorganised into
+  Source, Instances + Hull preview, and Output zones with consistent
+  spacing, semibold zone headers, and accessibility roles so screen
+  readers announce the new grouping correctly.
+- **`vanilla.List`-based instance picker.** Replaces the stack of
+  individual `CheckBox` widgets. The list supports multi-select,
+  keyboard navigation, type-ahead, and a `Cmd-A` / `Cmd-Shift-A`
+  select-all / deselect-all binding. Scroll height no longer needs to
+  be pre-reserved because the `List` is its own NSScrollView.
+- **Graphical hull plot (`hull_plot.py`).** New custom `NSView`
+  renders a 1-axis bar or 2-axis rectangle showing the full design
+  space vs. the selected sub-hull. Three-or-more-axis fonts fall back
+  to the existing chip preview. The view degrades gracefully when
+  AppKit is unavailable so the module is safe to import on CI.
+- **Presets (`presets.py`).** Save a named selection (instances +
+  output format + name pattern) and recall it from a popup. Atomic
+  JSON persistence under
+  `~/Library/Application Support/Glyphs 3/Plugins/vf-clamp/presets.json`
+  with schema validation and graceful corruption handling.
+- **Recent-folders MRU.** The output-folder popup remembers the last
+  5 folders used, persisted alongside presets in `recent.json`. The
+  list is capped at `RECENT_FOLDERS_MAX = 5` to match Finder's
+  "Recent Places" density.
+- **Drag-and-drop font loading.** The Source zone accepts dropped
+  `.ttf`, `.otf`, `.woff`, `.woff2` files via `NSPasteboardTypeFileURL`
+  / `NSFilenamesPboardType`. The drop target is the entire Source
+  zone, with a highlight ring during the drag.
+- **Format descriptions.** Each format in the popup now has a one-line
+  description beside it (e.g. "WOFF2 compressed web font (requires
+  brotli)") so the trade-off is visible before clicking Generate.
+- **Cmd-key shortcuts.** `Cmd-A` selects all instances, `Cmd-Shift-A`
+  deselects all, `Cmd-S` saves a preset, `Cmd-,` opens the preset
+  popup. Implemented via a local `NSEventMaskKeyDown` monitor.
+
+### Changed
+
+- **Plugin shell rewritten** to host the new three-zone layout while
+  keeping the existing `LiiiftVFClampPlugin` GeneralPlugin contract,
+  the file-source worker thread, and the GSFont main-thread path
+  untouched. Approximately 1.3k of the 2.0k-line `plugin.py` diff is
+  layout / wiring; the underlying `core.py`, `gsfont_core.py`, and
+  `formats.py` modules are unchanged.
+- **Axis colour palette factored** into `_rgb_for_axis` so both the
+  chip preview and the new hull plot share a single source of truth
+  for light/dark appearance handling.
+- **Status label promoted** to the Output zone footer with a clearer
+  separation between the error styling and the Reveal-in-Finder
+  affordance.
+
+### Fixed
+
+- Validation harness for headless smoke tests now uses an
+  attribute-tolerant `StubModule` subclass so `from AppKit import ...`
+  and `from GlyphsApp import ...` succeed under bare `python3 -c`
+  invocations without needing the real Glyphs runtime. No production
+  code change — the plugin's imports are correct.
+
 ## [1.1.5] — 2026-06-12
 
 - Fix: Instance checkboxes correctly rendered but **overlapped** the Hull / Output Name / Format / Folder rows below them. Cause: scroll widget grew downward at populate time while the rows below stayed at their original Y positions (vanilla widgets with positive Y don't auto-reflow). Fix: reserve the maximum scroll height (`MAX_VISIBLE_INSTANCES = 8` rows × 24px) at build time so every widget below sits at a fixed Y regardless of how many instances the font has. Trade-off: a font with 1-2 instances now shows some empty scroll space, but nothing overlaps and the window doesn't jump on font load.
