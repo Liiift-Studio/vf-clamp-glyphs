@@ -1,0 +1,288 @@
+# hull_plot.py — custom NSView that draws a 1- or 2-axis hull preview.
+# Falls back gracefully when AppKit primitives are unavailable (e.g. during
+# headless unit tests on a Linux CI box) so importing this module never
+# raises on a non-mac platform.
+
+from typing import Dict, List, Optional, Tuple
+
+try:
+	import objc  # type: ignore
+	from AppKit import (  # type: ignore
+		NSView,
+		NSColor,
+		NSBezierPath,
+		NSRectFill,
+		NSFont,
+		NSAttributedString,
+		NSForegroundColorAttributeName,
+		NSFontAttributeName,
+	)
+	from Foundation import NSMakeRect, NSMakePoint  # type: ignore
+	_APPKIT_AVAILABLE = True
+except Exception:  # noqa: BLE001 — AppKit may be entirely missing under CI
+	_APPKIT_AVAILABLE = False
+
+
+# Inner padding used by the plot so axis labels and tick marks don't crowd
+# the canvas edge. Generous enough to leave room for a "0–100" tick label
+# on either side of a 1-axis bar.
+PLOT_PAD = 16
+
+
+def is_available() -> bool:
+	"""Return True iff AppKit is importable on this runtime."""
+	return _APPKIT_AVAILABLE
+
+
+if _APPKIT_AVAILABLE:
+
+	class HullPlotView(NSView):
+		"""Custom NSView rendering 1- or 2-axis hull previews.
+
+		For 1 axis: a horizontal bar showing the full axis range with the
+		selected sub-hull tinted in the control accent colour.
+
+		For 2 axes: a rectangle in axis-coord space, the full design space
+		as a thin border and the selected hull as a filled accent rect.
+
+		For >=3 axes the view simply paints a centred "(see chips)" hint
+		because a 2D plot would mislead. Callers are expected to hide the
+		view in that case and surface the chips fallback instead.
+
+		Drawing is deliberately defensive: any failure inside drawRect_ is
+		swallowed so a malformed hull cannot crash the dialog.
+		"""
+
+		def initWithFrame_(self, frame):
+			"""Initialise with an empty model. ``set_hull_`` populates it later."""
+			self = objc.super(HullPlotView, self).initWithFrame_(frame)
+			if self is None:
+				return None
+			self._hull = {}            # type: Dict[str, Tuple[float, float]]
+			self._axis_ranges = {}     # type: Dict[str, Tuple[float, float, float]]
+			self._axis_colors = {}     # type: Dict[str, Tuple[float, float, float]]
+			return self
+
+		def setHull_axisRanges_axisColors_(self, hull, axis_ranges, axis_colors):
+			"""Update the model and request a redraw.
+
+			``hull`` — ``{tag: (lo, hi)}`` of the selected sub-hull.
+			``axis_ranges`` — ``{tag: (min, default, max)}`` of the full font.
+			``axis_colors`` — ``{tag: (r, g, b)}`` sRGB floats per axis tag.
+			"""
+			self._hull = dict(hull or {})
+			self._axis_ranges = dict(axis_ranges or {})
+			self._axis_colors = dict(axis_colors or {})
+			try:
+				self.setNeedsDisplay_(True)
+			except Exception:
+				pass
+
+		def isFlipped(self):
+			"""Use top-left origin so layout maths matches everything else."""
+			return True
+
+		def drawRect_(self, rect):
+			"""Paint the hull. All failures are swallowed (see class docstring)."""
+			try:
+				self._draw()
+			except Exception:
+				# Last-resort: leave the canvas blank rather than crash Glyphs.
+				pass
+
+		def _draw(self):
+			"""Inner draw implementation. Split out so drawRect_ stays trivial."""
+			bounds = self.bounds()
+			# Background — translucent so the surrounding vanilla.Box theme shows
+			# through. We deliberately do NOT fill solid; that would clash with
+			# Glyphs' dark translucent panels.
+			bg = NSColor.windowBackgroundColor().colorWithAlphaComponent_(0.0)
+			bg.set()
+			NSRectFill(bounds)
+
+			tags = list(self._hull.keys())
+			if not tags:
+				self._draw_hint('(select instances to preview)')
+				return
+			if len(tags) >= 3:
+				self._draw_hint('(see axis chips)')
+				return
+
+			if len(tags) == 1:
+				self._draw_one_axis(tags[0], bounds)
+			else:
+				self._draw_two_axes(tags[0], tags[1], bounds)
+
+		def _draw_hint(self, text):
+			"""Render a centred dim placeholder string."""
+			try:
+				attrs = {
+					NSForegroundColorAttributeName: NSColor.tertiaryLabelColor(),
+					NSFontAttributeName: NSFont.systemFontOfSize_(
+						NSFont.smallSystemFontSize()
+					),
+				}
+				s = NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+				size = s.size()
+				bounds = self.bounds()
+				x = (bounds.size.width - size.width) / 2
+				y = (bounds.size.height - size.height) / 2
+				s.drawAtPoint_(NSMakePoint(x, y))
+			except Exception:
+				pass
+
+		def _axis_color(self, tag):
+			"""Return an NSColor for ``tag``, defaulting to accent."""
+			rgb = self._axis_colors.get(tag)
+			if rgb is None:
+				return NSColor.controlAccentColor()
+			return NSColor.colorWithSRGBRed_green_blue_alpha_(
+				rgb[0], rgb[1], rgb[2], 1.0
+			)
+
+		def _draw_one_axis(self, tag, bounds):
+			"""Horizontal bar: full range as a thin track, hull as a thick fill."""
+			rng = self._axis_ranges.get(tag)
+			lo, hi = self._hull[tag]
+			# Fall back to the hull bounds if we don't know the full range —
+			# better than refusing to draw.
+			if rng is None:
+				axis_min, axis_max = lo, hi
+			else:
+				axis_min, _, axis_max = rng
+			if axis_max <= axis_min:
+				self._draw_hint(f'{tag} pinned at {lo:g}')
+				return
+
+			pad = PLOT_PAD
+			track_y = bounds.size.height / 2 - 4
+			track_h = 8
+			track_x = pad
+			track_w = bounds.size.width - 2 * pad
+
+			# Track (muted)
+			NSColor.tertiaryLabelColor().set()
+			path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+				NSMakeRect(track_x, track_y, track_w, track_h), 4.0, 4.0,
+			)
+			path.fill()
+
+			# Filled hull region
+			t0 = (lo - axis_min) / (axis_max - axis_min)
+			t1 = (hi - axis_min) / (axis_max - axis_min)
+			fill_x = track_x + t0 * track_w
+			fill_w = max(2.0, (t1 - t0) * track_w)
+			self._axis_color(tag).set()
+			fill_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+				NSMakeRect(fill_x, track_y, fill_w, track_h), 4.0, 4.0,
+			)
+			fill_path.fill()
+
+			# Labels: tag on the left, range underneath
+			label = f'{tag}  {lo:g} – {hi:g}' if lo != hi else f'{tag}  pinned at {lo:g}'
+			self._draw_label(label, NSMakePoint(pad, track_y - 18))
+
+			# Axis-min/max ticks under the bar
+			tick_attrs = {
+				NSForegroundColorAttributeName: NSColor.tertiaryLabelColor(),
+				NSFontAttributeName: NSFont.systemFontOfSize_(9.0),
+			}
+			lo_str = NSAttributedString.alloc().initWithString_attributes_(
+				f'{axis_min:g}', tick_attrs,
+			)
+			hi_str = NSAttributedString.alloc().initWithString_attributes_(
+				f'{axis_max:g}', tick_attrs,
+			)
+			lo_str.drawAtPoint_(NSMakePoint(track_x, track_y + track_h + 2))
+			hi_size = hi_str.size()
+			hi_str.drawAtPoint_(NSMakePoint(
+				track_x + track_w - hi_size.width, track_y + track_h + 2,
+			))
+
+		def _draw_two_axes(self, tag_x, tag_y, bounds):
+			"""2D rect: full space border, hull as filled accent rectangle."""
+			rng_x = self._axis_ranges.get(tag_x)
+			rng_y = self._axis_ranges.get(tag_y)
+			lo_x, hi_x = self._hull[tag_x]
+			lo_y, hi_y = self._hull[tag_y]
+
+			ax_x_min, _, ax_x_max = rng_x if rng_x else (lo_x, lo_x, hi_x)
+			ax_y_min, _, ax_y_max = rng_y if rng_y else (lo_y, lo_y, hi_y)
+
+			if ax_x_max <= ax_x_min or ax_y_max <= ax_y_min:
+				self._draw_hint(f'{tag_x} × {tag_y}')
+				return
+
+			pad = PLOT_PAD
+			# Leave room at the bottom for axis labels.
+			plot_x = pad
+			plot_y = pad
+			plot_w = bounds.size.width - 2 * pad
+			plot_h = bounds.size.height - 2 * pad - 14
+
+			# Full design space — thin border.
+			NSColor.tertiaryLabelColor().set()
+			border = NSBezierPath.bezierPathWithRect_(
+				NSMakeRect(plot_x, plot_y, plot_w, plot_h),
+			)
+			border.setLineWidth_(1.0)
+			border.stroke()
+
+			# Hull rect
+			def normx(v):
+				return plot_x + (v - ax_x_min) / (ax_x_max - ax_x_min) * plot_w
+			def normy(v):
+				# Top-left origin (isFlipped): higher y_tag value = lower y pixel.
+				t = (v - ax_y_min) / (ax_y_max - ax_y_min)
+				return plot_y + plot_h - t * plot_h
+
+			x0 = normx(lo_x)
+			x1 = normx(hi_x)
+			y0 = normy(hi_y)  # top edge corresponds to higher tag value
+			y1 = normy(lo_y)
+			fill_w = max(2.0, x1 - x0)
+			fill_h = max(2.0, y1 - y0)
+			self._axis_color(tag_x).colorWithAlphaComponent_(0.55).set()
+			fill_path = NSBezierPath.bezierPathWithRect_(
+				NSMakeRect(x0, y0, fill_w, fill_h),
+			)
+			fill_path.fill()
+
+			# Crosshair stroke at hull edges, tinted by Y axis
+			self._axis_color(tag_y).set()
+			outline = NSBezierPath.bezierPathWithRect_(
+				NSMakeRect(x0, y0, fill_w, fill_h),
+			)
+			outline.setLineWidth_(1.0)
+			outline.stroke()
+
+			# Axis labels under the plot
+			label = f'{tag_x}: {lo_x:g}–{hi_x:g}   {tag_y}: {lo_y:g}–{hi_y:g}'
+			self._draw_label(label, NSMakePoint(pad, plot_y + plot_h + 2))
+
+		def _draw_label(self, text, point):
+			"""Render a small primary-color label at ``point``."""
+			try:
+				attrs = {
+					NSForegroundColorAttributeName: NSColor.labelColor(),
+					NSFontAttributeName: NSFont.systemFontOfSize_(
+						NSFont.smallSystemFontSize()
+					),
+				}
+				s = NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+				s.drawAtPoint_(point)
+			except Exception:
+				pass
+
+
+def make_hull_plot_view(frame: Tuple[float, float, float, float]):
+	"""Return a new HullPlotView at ``frame`` or None if AppKit is missing.
+
+	``frame`` is ``(x, y, w, h)`` in the parent view's coord system.
+	"""
+	if not _APPKIT_AVAILABLE:
+		return None
+	view = HullPlotView.alloc().initWithFrame_(
+		NSMakeRect(frame[0], frame[1], frame[2], frame[3]),
+	)
+	return view

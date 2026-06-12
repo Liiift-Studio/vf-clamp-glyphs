@@ -2,11 +2,12 @@
 # Pure UI/registration concerns; all fonttools work lives in core.py.
 
 import os
+import re
 import sys
 import threading
 import traceback
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import objc
 from PyObjCTools import AppHelper
@@ -32,7 +33,16 @@ from AppKit import (
 	NSForegroundColorAttributeName,
 	NSFontAttributeName,
 	NSFont,
+	NSFontWeightSemibold,
 	NSTextAlignmentRight,
+	NSEvent,
+	NSEventMaskKeyDown,
+	NSCommandKeyMask,
+	NSView,
+	NSDragOperationCopy,
+	NSDragOperationNone,
+	NSFilenamesPboardType,
+	NSPasteboardTypeFileURL,
 )
 
 
@@ -67,6 +77,22 @@ DEFAULT_AXIS_COLOR_LIGHT = (0.30, 0.30, 0.30)
 DEFAULT_AXIS_COLOR = DEFAULT_AXIS_COLOR_DARK
 
 
+# ---------------------------------------------------------------------------
+# Format metadata — short human-readable descriptions surface beside the popup
+# so the user knows what they're picking before they click Generate. WOFF2
+# carries an explicit brotli warning because the dependency isn't always
+# bundled with Glyphs and the failure mode is otherwise opaque.
+# ---------------------------------------------------------------------------
+
+FORMAT_DESCRIPTIONS = {
+	'TTF': 'TrueType binary variable font',
+	'OTF': 'OpenType (CFF2) binary variable font',
+	'WOFF': 'Web Open Font Format wrapper',
+	'WOFF2': 'WOFF2 compressed web font (requires brotli)',
+	'GLYPHS': '.glyphs source file you can open in Glyphs',
+}
+
+
 def _is_dark_appearance():
 	"""Return True when the current effective appearance is a Dark Aqua variant."""
 	try:
@@ -81,6 +107,17 @@ def _is_dark_appearance():
 		return True
 
 
+def _rgb_for_axis(tag):
+	"""Return the raw (r, g, b) tuple for ``tag`` using the active palette."""
+	if _is_dark_appearance():
+		palette = AXIS_COLORS_DARK
+		default = DEFAULT_AXIS_COLOR_DARK
+	else:
+		palette = AXIS_COLORS_LIGHT
+		default = DEFAULT_AXIS_COLOR_LIGHT
+	return palette.get(tag, default)
+
+
 def _nscolor_for_axis(tag):
 	"""Return an NSColor for the small chip that sits next to ``tag`` in the hull preview.
 
@@ -88,14 +125,9 @@ def _nscolor_for_axis(tag):
 	system appearances. Falls back to the dark palette if appearance lookup
 	fails (matches Glyphs' historical default).
 	"""
-	if _is_dark_appearance():
-		palette = AXIS_COLORS_DARK
-		default = DEFAULT_AXIS_COLOR_DARK
-	else:
-		palette = AXIS_COLORS_LIGHT
-		default = DEFAULT_AXIS_COLOR_LIGHT
-	rgb = palette.get(tag, default)
+	rgb = _rgb_for_axis(tag)
 	return NSColor.colorWithSRGBRed_green_blue_alpha_(rgb[0], rgb[1], rgb[2], 1.0)
+
 
 # Make Resources/ importable so this file can pull in its sibling core.py
 _RESOURCES_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -126,6 +158,19 @@ from core import (  # noqa: E402  (deferred import after sys.path mutation)
 	save_gsfont_to_glyphs,
 	export_gsfont_binary_via_glyphs,
 )
+
+# Local sibling modules — small enough that we import them eagerly.
+from presets import (  # noqa: E402
+	load_presets,
+	save_presets,
+	make_preset,
+	load_recent_folders,
+	save_recent_folders,
+	push_recent_folder,
+	validate_output_name,
+	RECENT_FOLDERS_MAX,
+)
+from hull_plot import make_hull_plot_view, is_available as hull_plot_available  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -213,34 +258,127 @@ VFClampPlugin = LiiiftVFClampPlugin
 
 
 # ---------------------------------------------------------------------------
+# Drag-drop NSView — accepts font files dropped onto the file-source path
+# field and routes them through the dialog's _load_font helper.
+# ---------------------------------------------------------------------------
+
+class _FontDropView(NSView):
+	"""Transparent NSView overlay that accepts dragged font files.
+
+	Sits on top of the read-only fontPathField and converts file drops into
+	calls back into the dialog. We use an overlay rather than subclassing
+	NSTextField because the latter triggers a cascade of focus-ring and
+	first-responder bugs in vanilla.EditText.
+	"""
+
+	def initWithFrame_dialog_(self, frame, dialog):
+		"""Stash a weak-ish ref to the dialog so callbacks can find it."""
+		self = objc.super(_FontDropView, self).initWithFrame_(frame)
+		if self is None:
+			return None
+		self._dialog = dialog
+		# Register for the modern (NSPasteboardTypeFileURL) and legacy
+		# (NSFilenamesPboardType) drop types. Glyphs is currently shipped
+		# with PyObjC that exposes both.
+		try:
+			self.registerForDraggedTypes_([
+				NSPasteboardTypeFileURL,
+				NSFilenamesPboardType,
+			])
+		except Exception:
+			pass
+		return self
+
+	def acceptsFirstMouse_(self, event):
+		"""Let clicks pass through to the EditText below."""
+		return False
+
+	def _extract_path(self, sender):
+		"""Pull a single .ttf/.otf/.woff/.woff2 path off the drag pasteboard."""
+		try:
+			pb = sender.draggingPasteboard()
+		except Exception:
+			return None
+		paths = []
+		try:
+			files = pb.propertyListForType_(NSFilenamesPboardType)
+			if files:
+				paths.extend(files)
+		except Exception:
+			pass
+		if not paths:
+			try:
+				urls = pb.readObjectsForClasses_options_([], None) or []
+				for u in urls:
+					p = getattr(u, 'path', None)
+					if callable(p):
+						paths.append(p())
+			except Exception:
+				pass
+		for p in paths:
+			ext = os.path.splitext(p)[1].lower().lstrip('.')
+			if ext in ('ttf', 'otf', 'woff', 'woff2'):
+				return p
+		return None
+
+	def draggingEntered_(self, sender):
+		"""Light up the drop ring when a font file enters the field."""
+		return NSDragOperationCopy if self._extract_path(sender) else NSDragOperationNone
+
+	def prepareForDragOperation_(self, sender):
+		"""Final accept gate — must mirror draggingEntered_."""
+		return self._extract_path(sender) is not None
+
+	def performDragOperation_(self, sender):
+		"""Route the dropped file into the dialog's load pipeline."""
+		path = self._extract_path(sender)
+		if not path:
+			return False
+		try:
+			# Toggle to file mode first so the user sees the load happen in
+			# context. The dialog's own helper handles status messaging.
+			self._dialog._transition_source_mode(self._dialog.SOURCE_FILE)
+			self._dialog._load_font(path)
+		except Exception:
+			traceback.print_exc()
+			return False
+		return True
+
+
+# ---------------------------------------------------------------------------
 # Dialog
 # ---------------------------------------------------------------------------
 
 class VFClampDialog:
-	"""Dialog for selecting named instances and generating a restricted VF."""
+	"""Dialog for selecting named instances and generating a restricted VF.
 
-	# Pixel metrics — kept as class attrs so future dialogs cannot shadow them
-	W = 540
+	v1.2.0 introduces a three-zone layout:
+
+	  Zone 1 — Source picker (radio + file path / open-font popup)
+	  Zone 2 — Dashboard: instance list (left) + output preview (right)
+	  Zone 3 — Output options (preset, name, format, folder)
+
+	The bottom action bar carries shortcut hints on the left and a large
+	primary-blue Generate button on the right.
+	"""
+
+	# Pixel metrics — kept as class attrs so future dialogs cannot shadow them.
+	# v1.2.0 widens the dialog to fit the two-column dashboard.
+	W = 820
 	PAD = 16
 	LABEL_H = 20
 	FIELD_H = 22
 	BTN_H = 24
 	ROW = 28
-	CHECK_H = 20
-	CHECK_GAP = 4
-	# Always reserve scroll-area space for this many visible rows at build time.
-	# Setting this once at the layout level (rather than min(n, 8) at populate
-	# time) keeps the widgets below the scroll area at stable Y positions —
-	# vanilla widgets with positive Y don't auto-reflow, so a growing scroll
-	# would otherwise overlap the Hull / Output Name / Format / Folder rows.
-	MAX_VISIBLE_INSTANCES = 8
-	# Filter-style layout: right-aligned label column + control column
-	LABEL_COL_W = 110
-	LABEL_GAP = 12
-	CONTROL_X = PAD + LABEL_COL_W + LABEL_GAP  # 138
-	HULL_H = 60  # space for up to ~3 axis chips
-	# Bottom action bar button widths
-	GENERATE_W = 100
+	# Zone heights are fixed so the action bar always sits at the same Y.
+	ZONE1_H = 96
+	ZONE2_H = 348
+	ZONE3_H = 144
+	# Dashboard internals
+	COL_GAP = 16
+	# Bottom action bar button widths — Generate is larger and primary blue.
+	GENERATE_W = 140
+	GENERATE_H = 32
 	CANCEL_W = 80
 	REVEAL_W = 70
 	ACTION_GAP = 8
@@ -258,14 +396,38 @@ class VFClampDialog:
 	# Sentinel item shown when there are zero open Glyphs documents.
 	_GSFONT_POPUP_EMPTY = '(no open Glyphs fonts)'
 
+	# Preset popup sentinels — must not collide with user preset names.
+	_PRESET_NONE_LABEL = '(no preset)'
+	_PRESET_SAVE_LABEL = '— Save Current… —'
+	_PRESET_MANAGE_LABEL = '— Manage… —'
+
+	# Recent-folders popup leader label.
+	_RECENT_HEADER_LABEL = '▾ Recent'
+
+	# Smart-select More popup options.
+	_MORE_SELECT_HEADER = '▾ More'
+	_MORE_SELECT_ITALIC = 'Select All Italic'
+	_MORE_SELECT_ROMAN = 'Select All Roman'
+
 	def __init__(self):
 		"""Initialise dialog state. Window is shown by show()."""
 		self._font_path = None
 		# Parsed TTFont cache populated by _load_font and reused by
-		# _refresh_axis_preview so checkbox toggles don't re-parse the disk file.
+		# _refresh_preview so list edits don't re-parse the disk file.
 		self._cached_font = None
-		self._instance_names = []   # ordered list from fvar OR gsfont
-		self._checks = []           # list of CheckBox widgets (parallel to _instance_names)
+
+		# Instance model — replaces the old list-of-CheckBox widgets.
+		# All three lists are parallel and the source of truth for selection.
+		self._instance_names: List[str] = []          # ordered subfamily labels
+		self._instance_coords: List[Dict[str, float]] = []   # per-instance axis coord dicts
+		self._instance_checked: List[bool] = []       # parallel bool list
+		self._instance_filter: str = ''               # current SearchBox text
+		self._visible_to_full: List[int] = []         # row index -> _instance_names index
+		# Re-entry guard so a bulk model update doesn't fire N edit callbacks.
+		self._suspend_list_edit_cb: bool = False
+		# Axis ranges for the hull plot (full design space, not the hull).
+		self._fvar_axis_ranges: Dict[str, Tuple[float, float, float]] = {}
+
 		self._name_overridden = False
 		# Phase 1+2: source can be a file on disk or a currently-open GSFont.
 		self._source_mode = self.SOURCE_FILE
@@ -274,22 +436,44 @@ class VFClampDialog:
 		# Cancellation flag — set by _on_cancel, read by worker thread to short-circuit
 		# the file-source pipeline and skip writing partial output.
 		self._cancelled = False
+		# Output measurements — when known, drive the size-estimate line.
+		self._source_size_bytes: Optional[int] = None
+
+		# Persistent state — presets + recents. Failures fall back to empty.
+		try:
+			self._presets = load_presets()
+		except Exception:
+			self._presets = {}
+		try:
+			self._recent_folders = load_recent_folders()
+		except Exception:
+			self._recent_folders = []
+
+		# Keyboard-shortcut local event monitor handle; removed on close().
+		self._shortcut_monitor = None
+		# Drag-drop overlay — kept around so AppKit retains it.
+		self._drop_view = None
+		# Hull plot custom NSView (None when AppKit is unavailable).
+		self._hull_plot_view = None
+		# Last generated path for the Reveal button.
+		self._last_output_path = None
+
 		self._build_window()
 		# Populate the open-Glyphs-font popup once the window exists.
 		self._refresh_gsfont_popup()
+		self._refresh_presets_popup()
+		self._refresh_recents_popup()
 		# Default to "Open Font" mode when at least one Glyphs document is
-		# open; this matches the canonical workflow of "I have my font open,
-		# clamp it" without an extra mode-toggle click. Falls back to "File"
-		# when no Glyphs documents are open.
-		# Initial transition does not clear inactive state — nothing is loaded
-		# yet, so there is nothing to clear; passing clear_inactive=False also
-		# avoids a spurious gsfontPopup.set(0) before the popup has the right
-		# items in place. (Issue #44.)
+		# open; falls back to "File" when no Glyphs documents are open.
 		if self._gsfont_options:
 			self._transition_source_mode(self.SOURCE_GSFONT, clear_inactive=False)
 			self._auto_select_frontmost_gsfont()
 		else:
 			self._transition_source_mode(self.SOURCE_FILE, clear_inactive=False)
+
+		# Wire keyboard shortcuts after the window is fully built so the
+		# monitor closure can safely call back into self.w.
+		self._install_shortcut_monitor()
 
 	# ------------------------------------------------------------------
 	# Window construction
@@ -305,84 +489,92 @@ class VFClampDialog:
 			pass
 		return box
 
-	def _build_window(self):
-		"""Build the dialog layout — Glyphs filter-style with right-aligned labels."""
-		w = self.W
-		h = self._compute_window_height(0)
+	@objc.python_method
+	def _semibold_label(self, posSize, text):
+		"""Build a small semibold TextBox used as a section header inside a zone."""
+		box = vanilla.TextBox(posSize, text)
+		try:
+			cell = box._nsObject.cell()
+			cell.setFont_(
+				NSFont.systemFontOfSize_weight_(NSFont.smallSystemFontSize(), NSFontWeightSemibold)
+			)
+		except Exception:
+			pass
+		return box
 
-		# vanilla.Window picks up the user's macOS appearance (dark mode → dark
-		# translucent panel), which matches the native Glyphs filter look.
+	def _build_window(self):
+		"""Build the three-zone dialog layout."""
+		w = self.W
+		h = self._compute_window_height()
+
 		self.w = vanilla.Window(
 			(w, h),
-			'vf-clamp — Generate Restricted VFs',
-			minSize=(w, 360),
-			maxSize=(w, 1200),
+			'◆ vf-clamp — Generate Restricted VFs',
+			minSize=(w, h),
+			maxSize=(w, h),
 		)
-		# Persist window position across launches. setFrameAutosaveName_ is
-		# AppKit's documented mechanism for restoring user-positioned windows;
-		# vanilla.Window doesn't accept it as a kwarg in older builds, so we
-		# apply it to the underlying NSWindow.
+		# Persist window position across launches.
 		try:
 			nswin = self.w.getNSWindow() if hasattr(self.w, 'getNSWindow') else self.w._window
 			if nswin is not None:
 				nswin.setFrameAutosaveName_('com.liiift.vf-clamp.dialog')
 		except (AttributeError, RuntimeError):
 			pass
+
 		win = self.w
 		PAD = self.PAD
-		LABEL_H = self.LABEL_H
-		FIELD_H = self.FIELD_H
-		BTN_H = self.BTN_H
-		ROW = self.ROW
-		LABEL_COL_W = self.LABEL_COL_W
-		CONTROL_X = self.CONTROL_X
-		HULL_H = self.HULL_H
-
 		y = PAD
+		y = self._build_zone_source(y)
+		y = self._build_zone_dashboard(y)
+		y = self._build_zone_output(y)
+		y = self._build_action_bar(y)
+		self._static_sections_height = y
 
-		# --- Row 1: Source selector (RadioGroup) -----------------------
-		win.sourceLabel = self._right_label((PAD, y + 4, LABEL_COL_W, LABEL_H), 'Source:')
+	# ------------------------------------------------------------------
+	# Zone builders
+	# ------------------------------------------------------------------
+
+	def _build_zone_source(self, y):
+		"""Zone 1 — Source picker. Returns the new y after the zone."""
+		win = self.w
+		PAD = self.PAD
+		box = vanilla.Box((PAD, y, -PAD, self.ZONE1_H))
+		win.zone1 = box
+
+		# Title row
+		win.zone1Title = self._semibold_label((12, 6, -12, 18), 'SOURCE')
+
+		# Radio row
 		win.sourceRadio = vanilla.RadioGroup(
-			(CONTROL_X, y, -PAD, ROW),
+			(12, 30, 220, 22),
 			['Open Font', 'File'],
 			isVertical=False,
 			callback=self._on_source_radio_changed,
 		)
-		win.sourceRadio.set(1)  # default to File; __init__ flips to Open Font if any are present
-		# Accessibility: VoiceOver should announce the source-selector role
-		# rather than reading the two radio cells as anonymous toggles.
+		win.sourceRadio.set(1)
 		try:
-			win.sourceRadio._nsObject.setAccessibilityLabel_(
-				'Font source — Open Font or File'
-			)
+			win.sourceRadio._nsObject.setAccessibilityLabel_('Font source')
 		except (AttributeError, RuntimeError):
 			pass
-		y += ROW + 6
 
-		# --- Row 2: Source-specific input (file row OR gsfont popup, same Y)
-		# Both widgets share the row; only the one matching the active mode is shown.
-		win.sourceInputLabel = self._right_label((PAD, y + 4, LABEL_COL_W, LABEL_H), 'File:')
-
-		# File-mode widgets
+		# Input row — both widgets share Y; visibility flips with mode.
+		# File mode
 		win.fontPathField = vanilla.EditText(
-			(CONTROL_X, y, -94, FIELD_H),
-			placeholder='Select a .ttf or .otf variable font…',
+			(12, 60, -110, 22),
+			placeholder='Drag a .ttf/.otf/.woff/.woff2 here or click Browse…',
 			readOnly=True,
 		)
 		win.browseButton = vanilla.Button(
-			(-90, y - 1, -PAD, BTN_H),
+			(-100, 59, 88, 24),
 			'Browse…',
 			callback=self._on_browse,
 		)
-
-		# GSFont-mode widget (occupies the same Y, full control width)
+		# Open-Font mode
 		win.gsfontPopup = vanilla.PopUpButton(
-			(CONTROL_X, y, -PAD, FIELD_H + 2),
+			(12, 60, -12, 24),
 			[self._GSFONT_POPUP_EMPTY],
 			callback=self._on_gsfont_chosen,
 		)
-		# Accessibility: name file path field and gsfont popup explicitly so
-		# VoiceOver reads them in context rather than as anonymous controls.
 		for widget, ax_label in (
 			(win.fontPathField, 'Selected font file path'),
 			(win.browseButton, 'Browse for a variable font file'),
@@ -392,35 +584,77 @@ class VFClampDialog:
 				widget._nsObject.setAccessibilityLabel_(ax_label)
 			except (AttributeError, RuntimeError):
 				pass
-		# Initial visibility is set by _set_source_mode_ui after the build.
-		y += ROW + 8
 
-		# --- Divider ----------------------------------------------------
-		win.divider1 = vanilla.HorizontalLine((PAD, y, -PAD, 1))
-		y += 12
+		# Attach drag-drop overlay over the file path field. Created after the
+		# field exists so the overlay's frame matches the EditText.
+		self._install_drop_handler()
 
-		# --- Row 3: Instances label + bulk select buttons --------------
-		win.instanceLabel = self._right_label((PAD, y, LABEL_COL_W, LABEL_H), 'Instances:')
-		# Bulk-selection helpers on the right
+		# Add all widgets to the Box. vanilla.Box accepts attribute assignment.
+		box.title = win.zone1Title
+		box.radio = win.sourceRadio
+		box.path = win.fontPathField
+		box.browse = win.browseButton
+		box.gsfont = win.gsfontPopup
+
+		return y + self.ZONE1_H + PAD
+
+	def _build_zone_dashboard(self, y):
+		"""Zone 2 — instance picker (left) + output preview (right)."""
+		win = self.w
+		PAD = self.PAD
+		ZONE_H = self.ZONE2_H
+		box = vanilla.Box((PAD, y, -PAD, ZONE_H))
+		win.zone2 = box
+
+		# Compute the two halves. Box inner width ≈ W - 2*PAD - 2*inset.
+		inset = 12
+		inner_w = self.W - 2 * PAD - 2 * inset
+		col_w = (inner_w - self.COL_GAP) // 2
+		left_x = inset
+		right_x = inset + col_w + self.COL_GAP
+
+		# ---------- LEFT HALF — Instance picker ----------
+		win.instanceHeader = self._semibold_label(
+			(left_x, 6, col_w, 18), 'INSTANCES (0 OF 0)',
+		)
+		# Filter SearchBox — falls back to EditText on older vanilla builds.
+		try:
+			win.filterBox = vanilla.SearchBox(
+				(left_x, 30, col_w, 22),
+				placeholder='Filter…',
+				callback=self._on_filter_changed,
+			)
+		except AttributeError:
+			win.filterBox = vanilla.EditText(
+				(left_x, 30, col_w, 22),
+				placeholder='Filter…',
+				callback=self._on_filter_changed,
+			)
+
+		# Bulk select buttons row
+		btn_y = 60
 		win.allBtn = vanilla.Button(
-			(-PAD - 180, y - 2, 56, BTN_H), 'All',
+			(left_x, btn_y, 56, 22), 'All',
 			callback=self._on_select_all, sizeStyle='small',
 		)
 		win.noneBtn = vanilla.Button(
-			(-PAD - 122, y - 2, 56, BTN_H), 'None',
+			(left_x + 60, btn_y, 56, 22), 'None',
 			callback=self._on_select_none, sizeStyle='small',
 		)
 		win.invertBtn = vanilla.Button(
-			(-PAD - 64, y - 2, 64, BTN_H), 'Invert',
+			(left_x + 120, btn_y, 64, 22), 'Invert',
 			callback=self._on_select_invert, sizeStyle='small',
 		)
-		# Accessibility + tooltips: VoiceOver reads short labels like 'All'
-		# as ambiguous without context; sighted users also benefit from a
-		# tooltip explaining the abbreviated scope.
+		win.moreSelectBtn = vanilla.PopUpButton(
+			(left_x + 188, btn_y, 110, 22),
+			[self._MORE_SELECT_HEADER, self._MORE_SELECT_ITALIC, self._MORE_SELECT_ROMAN],
+			callback=self._on_more_select,
+		)
 		for btn_widget, ax_label in (
 			(win.allBtn, 'Select all instances'),
 			(win.noneBtn, 'Deselect all instances'),
 			(win.invertBtn, 'Invert instance selection'),
+			(win.moreSelectBtn, 'More selection options'),
 		):
 			try:
 				btn_widget._nsObject.setAccessibilityLabel_(ax_label)
@@ -430,151 +664,254 @@ class VFClampDialog:
 				btn_widget._nsObject.setToolTip_(ax_label)
 			except (AttributeError, RuntimeError):
 				pass
-		# Bulk-select buttons are meaningless without an instance list — keep
-		# them hidden until _populate_instance_checks runs. Avoids dead
-		# affordances that surface a stale "click All" before any font is
-		# loaded.
-		for btn_widget in (win.allBtn, win.noneBtn, win.invertBtn):
-			try:
-				btn_widget.show(False)
-			except (AttributeError, RuntimeError):
-				pass
-		y += LABEL_H + 6
 
-		# --- Row 4: Instance scroll area (in the control column) -------
-		# Reserve MAX_VISIBLE_INSTANCES rows of vertical space up front so the
-		# Hull/Output/Format/Folder rows below sit at fixed Y positions and
-		# the scroll widget never has to resize at populate time.
-		reserved_scroll_h = (
-			self.MAX_VISIBLE_INSTANCES * (self.CHECK_H + self.CHECK_GAP) + 8
-		)
-		win.instancePlaceholder = vanilla.TextBox(
-			(CONTROL_X, y, -PAD, LABEL_H),
-			'Open a variable font to see its named instances.',
-			sizeStyle='small',
-		)
-		self._scroll_top_y = y
-		self._scroll_height = reserved_scroll_h
-		# Seed the ScrollView with an empty placeholder Group; the document
-		# view is replaced by _populate_instance_checks when a font loads.
-		self._scroll_placeholder_group = vanilla.Group((0, 0, 1, 1))
-		win.instanceScroll = vanilla.ScrollView(
-			(CONTROL_X, y, -PAD, reserved_scroll_h),
-			self._scroll_placeholder_group._nsObject,
-			hasHorizontalScroller=False,
-			hasVerticalScroller=True,
-			autohidesScrollers=True,
-		)
-		win.instanceScroll.show(False)
-		# Accessibility: name the scroll region so VoiceOver announces
-		# "Named instances, scroll area" instead of an anonymous scroll view.
+		# vanilla.List — replaces the prior ScrollView-of-CheckBox layout.
+		list_y = btn_y + 30
+		list_h = ZONE_H - list_y - 10
 		try:
-			win.instanceScroll._nsObject.setAccessibilityLabel_(
-				'Named instances'
+			win.instanceList = vanilla.List(
+				(left_x, list_y, col_w, list_h),
+				items=[],
+				columnDescriptions=[
+					dict(
+						title='', key='checked',
+						cell=vanilla.CheckBoxListCell(), width=22, editable=True,
+					),
+					dict(title='Instance', key='display', editable=False),
+				],
+				allowsMultipleSelection=True,
+				allowsEmptySelection=True,
+				editCallback=self._on_list_edit,
+				selectionCallback=self._on_list_selection,
+				showColumnTitles=False,
 			)
+			self._using_vanilla_list = True
+		except (AttributeError, TypeError, RuntimeError):
+			# Fallback: vanilla.List with CheckBoxListCell is unavailable on
+			# this Glyphs build — surface a placeholder so the dialog still
+			# opens. (Smart-select / filter are no-ops in the fallback.)
+			win.instanceList = vanilla.TextBox(
+				(left_x, list_y, col_w, list_h),
+				'(instance list unavailable on this Glyphs build)',
+				sizeStyle='small',
+			)
+			self._using_vanilla_list = False
+		try:
+			win.instanceList._nsObject.setAccessibilityLabel_('Named instances')
 		except (AttributeError, RuntimeError):
 			pass
-		y += reserved_scroll_h + 8
 
-		# --- Row 5: Hull preview (colored axis chips) ------------------
-		win.hullLabel = self._right_label((PAD, y + 2, LABEL_COL_W, LABEL_H), 'Hull:')
-		win.axisPreview = vanilla.TextBox(
-			(CONTROL_X, y, -PAD, HULL_H),
+		# Bulk-select controls and filter hidden until a font is loaded so
+		# dead affordances don't surface a stale "click All" with nothing to
+		# select. Same pattern as v1.1.x.
+		for widget in (
+			win.allBtn, win.noneBtn, win.invertBtn,
+			win.moreSelectBtn, win.filterBox,
+		):
+			try:
+				widget.show(False)
+			except (AttributeError, RuntimeError):
+				pass
+
+		# ---------- RIGHT HALF — Output preview ----------
+		win.previewHeader = self._semibold_label(
+			(right_x, 6, col_w, 18), 'OUTPUT PREVIEW',
+		)
+		win.previewName = vanilla.TextBox(
+			(right_x, 30, col_w, 22),
+			'',
+			selectable=True,
+		)
+		try:
+			cell = win.previewName._nsObject.cell()
+			cell.setFont_(NSFont.systemFontOfSize_(14.0))
+		except Exception:
+			pass
+
+		# Hull plot — custom NSView when available, else a chips text box.
+		plot_y = 60
+		plot_h = 140
+		view = make_hull_plot_view((right_x, plot_y, col_w, plot_h))
+		if view is not None:
+			# Mount the raw NSView as a sibling of the Box's internal NSView.
+			try:
+				box._nsObject.addSubview_(view)
+				# Translate the box-relative origin so the rect lands inside the box.
+				# vanilla.Box's content view starts at the inner padding; addSubview_
+				# uses the box's own coordinate space.
+				self._hull_plot_view = view
+			except (AttributeError, RuntimeError):
+				self._hull_plot_view = None
+
+		# Chips fallback — always exists. When the custom view is present
+		# and showing <=2 axes, the chips view is hidden.
+		win.hullChips = vanilla.TextBox(
+			(right_x, plot_y, col_w, plot_h),
 			'(select instances to preview)',
 			sizeStyle='small',
 			selectable=True,
 		)
-		# vanilla.TextBox wraps NSTextField in single-line mode by default;
-		# the hull preview puts one axis per line so we need to turn wrapping
-		# back on or the '\n' chars render as glyph-not-found boxes. The
-		# attribute access is wrapped because older PyObjC builds may not
-		# expose every setter; failure is non-fatal (falls back to plain text).
 		try:
-			cell = win.axisPreview._nsObject.cell()
+			cell = win.hullChips._nsObject.cell()
 			cell.setUsesSingleLineMode_(False)
 			cell.setWraps_(True)
 		except (AttributeError, RuntimeError):
 			pass
-		y += HULL_H + 8
 
-		# --- Divider ----------------------------------------------------
-		win.divider2 = vanilla.HorizontalLine((PAD, y, -PAD, 1))
-		y += 12
+		# Size estimate
+		win.sizeEstimate = self._right_label(
+			(right_x, plot_y + plot_h + 8, col_w, 18), '',
+		)
+		try:
+			cell = win.sizeEstimate._nsObject.cell()
+			cell.setAlignment_(0)  # NSTextAlignmentLeft
+			cell.setFont_(NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()))
+			cell.setTextColor_(NSColor.secondaryLabelColor())
+		except Exception:
+			pass
 
-		# --- Row 6: Output Name ----------------------------------------
-		win.nameLabel = self._right_label((PAD, y + 4, LABEL_COL_W, LABEL_H), 'Output Name:')
+		return y + ZONE_H + PAD
+
+	def _build_zone_output(self, y):
+		"""Zone 3 — preset, output name, format, folder."""
+		win = self.w
+		PAD = self.PAD
+		ZONE_H = self.ZONE3_H
+		box = vanilla.Box((PAD, y, -PAD, ZONE_H))
+		win.zone3 = box
+
+		# Layout grid — right-aligned label column + control column
+		LABEL_W = 90
+		LABEL_X = 12
+		CTRL_X = 12 + LABEL_W + 8
+
+		row_y = 8
+		# --- Preset
+		win.presetLabel = self._right_label((LABEL_X, row_y + 2, LABEL_W, 20), 'Preset:')
+		win.presetPopup = vanilla.PopUpButton(
+			(CTRL_X, row_y, 240, 22),
+			[self._PRESET_NONE_LABEL, self._PRESET_SAVE_LABEL, self._PRESET_MANAGE_LABEL],
+			callback=self._on_preset_chosen,
+		)
+		try:
+			win.presetPopup._nsObject.setAccessibilityLabel_('Preset')
+		except (AttributeError, RuntimeError):
+			pass
+		row_y += 30
+
+		# --- Output name
+		win.nameLabel = self._right_label((LABEL_X, row_y + 2, LABEL_W, 20), 'Output Name:')
 		win.nameField = vanilla.EditText(
-			(CONTROL_X, y, -PAD, FIELD_H),
+			(CTRL_X, row_y, -12, 22),
 			placeholder='e.g. MyFont Light-Bold',
 			callback=self._on_name_edited,
 		)
 		try:
-			win.nameField._nsObject.setAccessibilityLabel_(
-				'Output family name'
-			)
+			win.nameField._nsObject.setAccessibilityLabel_('Output family name')
 		except (AttributeError, RuntimeError):
 			pass
-		y += ROW + 4
+		row_y += 30
 
-		# --- Row 7: Format ---------------------------------------------
-		win.formatLabel = self._right_label((PAD, y + 4, LABEL_COL_W, LABEL_H), 'Format:')
+		# --- Format + description
+		win.formatLabel = self._right_label((LABEL_X, row_y + 2, LABEL_W, 20), 'Format:')
 		win.formatPopup = vanilla.PopUpButton(
-			(CONTROL_X, y, 160, FIELD_H + 2),
+			(CTRL_X, row_y, 120, 22),
 			list(self.BINARY_FORMATS),
+			callback=self._on_format_changed,
 		)
 		try:
-			win.formatPopup._nsObject.setAccessibilityLabel_(
-				'Output font format'
-			)
+			win.formatPopup._nsObject.setAccessibilityLabel_('Output font format')
 		except (AttributeError, RuntimeError):
 			pass
-		y += ROW + 4
+		win.formatDescription = vanilla.TextBox(
+			(CTRL_X + 130, row_y + 2, -12, 18),
+			'',
+			sizeStyle='small',
+			selectable=True,
+		)
+		try:
+			cell = win.formatDescription._nsObject.cell()
+			cell.setTextColor_(NSColor.secondaryLabelColor())
+		except Exception:
+			pass
+		row_y += 30
 
-		# --- Row 8: Output Folder --------------------------------------
-		win.folderLabel = self._right_label((PAD, y + 4, LABEL_COL_W, LABEL_H), 'Folder:')
+		# --- Folder
+		win.folderLabel = self._right_label((LABEL_X, row_y + 2, LABEL_W, 20), 'Folder:')
+		# Layout: [folderField][Choose…][▾ Recent]
 		win.folderField = vanilla.EditText(
-			(CONTROL_X, y, -94, FIELD_H),
+			(CTRL_X, row_y, -218, 22),
 			placeholder='Default: same folder as source',
 			readOnly=True,
 		)
 		win.folderButton = vanilla.Button(
-			(-90, y - 1, -PAD, BTN_H),
+			(-210, row_y - 1, 90, 24),
 			'Choose…',
 			callback=self._on_choose_folder,
 		)
+		win.recentFoldersPopup = vanilla.PopUpButton(
+			(-112, row_y - 1, 100, 24),
+			[self._RECENT_HEADER_LABEL],
+			callback=self._on_recent_folder_chosen,
+		)
+		for widget, ax_label in (
+			(win.folderField, 'Output folder path'),
+			(win.folderButton, 'Choose the output folder'),
+			(win.recentFoldersPopup, 'Recent folders'),
+		):
+			try:
+				widget._nsObject.setAccessibilityLabel_(ax_label)
+			except (AttributeError, RuntimeError):
+				pass
+
+		return y + ZONE_H + PAD
+
+	def _build_action_bar(self, y):
+		"""Bottom row — shortcut hints, spinner+status, Reveal/Cancel/Generate."""
+		win = self.w
+		PAD = self.PAD
+
+		# Shortcut hints on the left
+		win.shortcutHints = vanilla.TextBox(
+			(PAD, y + 10, 380, 18),
+			'⌘A All   ⌘D None   ⌘I Invert   ⏎ Generate',
+			sizeStyle='small',
+			selectable=False,
+		)
 		try:
-			win.folderField._nsObject.setAccessibilityLabel_(
-				'Output folder path'
-			)
-		except (AttributeError, RuntimeError):
+			cell = win.shortcutHints._nsObject.cell()
+			cell.setTextColor_(NSColor.tertiaryLabelColor())
+		except Exception:
 			pass
-		y += ROW + 8
 
-		# --- Divider ----------------------------------------------------
-		win.divider3 = vanilla.HorizontalLine((PAD, y, -PAD, 1))
-		y += 12
+		# Spinner + status
+		win.spinner = vanilla.ProgressSpinner((PAD + 380, y + 12, 16, 16), displayWhenStopped=False)
+		try:
+			win.spinner.stop()
+		except Exception:
+			pass
 
-		# --- Bottom action bar -----------------------------------------
-		# Layout: [spinner] [statusLabel] ... [Reveal] [Cancel] [Generate]
-		GEN_W = self.GENERATE_W
-		CAN_W = self.CANCEL_W
-		REV_W = self.REVEAL_W
-		GAP = self.ACTION_GAP
+		# Right-anchored buttons
+		gen_w = self.GENERATE_W
+		gen_h = self.GENERATE_H
+		can_w = self.CANCEL_W
+		rev_w = self.REVEAL_W
+		gap = self.ACTION_GAP
 
+		# Generate — large + primary blue via the system key-equivalent.
+		# Use a vertical offset so the larger button is centred against the
+		# smaller Reveal/Cancel buttons at the same baseline.
+		gen_y = y + (24 - gen_h) // 2 + 4
 		win.generateButton = vanilla.Button(
-			(-PAD - GEN_W, y, GEN_W, BTN_H),
+			(-PAD - gen_w, gen_y, gen_w, gen_h),
 			'Generate',
 			callback=self._on_generate,
 		)
 		win.generateButton.enable(False)
-		# Return key → default action; on macOS this also paints the button
-		# with the system accent colour, giving us the "primary blue" look.
 		try:
 			win.generateButton._nsObject.setKeyEquivalent_('\r')
 		except Exception:
 			pass
-		# Accessibility: VoiceOver should announce the verbose action label
-		# for the primary button (Return-key equivalent is the default).
 		try:
 			win.generateButton._nsObject.setAccessibilityLabel_(
 				'Generate the restricted variable font'
@@ -583,11 +920,10 @@ class VFClampDialog:
 			pass
 
 		win.cancelButton = vanilla.Button(
-			(-PAD - GEN_W - GAP - CAN_W, y, CAN_W, BTN_H),
+			(-PAD - gen_w - gap - can_w, y + 10, can_w, 24),
 			'Cancel',
 			callback=self._on_cancel,
 		)
-		# Escape closes the dialog.
 		try:
 			win.cancelButton._nsObject.setKeyEquivalent_('\x1b')
 		except Exception:
@@ -600,18 +936,15 @@ class VFClampDialog:
 			pass
 
 		win.revealButton = vanilla.Button(
-			(-PAD - GEN_W - GAP - CAN_W - GAP - REV_W, y, REV_W, BTN_H),
+			(-PAD - gen_w - gap - can_w - gap - rev_w, y + 10, rev_w, 24),
 			'Reveal',
 			callback=self._on_reveal,
 			sizeStyle='small',
 		)
 		win.revealButton.enable(False)
-		win.revealButton.show(False)  # appears only after a successful generate
-		# Tooltip + accessibility label so 'Reveal' isn't ambiguous in
-		# isolation (reveal what, where?).
+		win.revealButton.show(False)
 		for widget, ax_label in (
 			(win.revealButton, 'Reveal the generated font in Finder'),
-			(win.folderButton, 'Choose the output folder'),
 		):
 			try:
 				widget._nsObject.setAccessibilityLabel_(ax_label)
@@ -621,77 +954,121 @@ class VFClampDialog:
 				widget._nsObject.setToolTip_(ax_label)
 			except (AttributeError, RuntimeError):
 				pass
-		self._last_output_path = None
 
-		# Spinner + status on the left
-		win.spinner = vanilla.ProgressSpinner((PAD, y + 4, 16, 16), displayWhenStopped=False)
-		try:
-			win.spinner.stop()
-		except Exception:
-			pass
-		status_right_offset = PAD + GEN_W + GAP + CAN_W + GAP + REV_W + GAP
+		# Status label sits between the spinner and the Reveal button.
+		status_right_offset = PAD + gen_w + gap + can_w + gap + rev_w + gap
 		win.statusLabel = vanilla.TextBox(
-			(PAD + 22, y + 5, -status_right_offset, LABEL_H),
+			(PAD + 400, y + 12, -status_right_offset, 18),
 			'',
 			sizeStyle='small',
 			selectable=True,
 		)
-		# Accessibility: spinner + status text combine into an aria-live-like
-		# announcement region. VoiceOver should treat status as a live region
-		# so Generating… / Saved: / Error: messages are spoken automatically.
 		try:
 			win.statusLabel._nsObject.setAccessibilityLabel_('Status')
 		except (AttributeError, RuntimeError):
 			pass
-		try:
-			win.spinner._nsObject.setAccessibilityLabel_(
-				'Working — generating font'
-			)
-		except (AttributeError, RuntimeError):
-			pass
-		y += BTN_H + PAD
-		self._static_sections_height = y
 
-	def _compute_window_height(self, n_instances):
-		"""Return total window height — always reserves space for MAX_VISIBLE_INSTANCES rows.
+		return y + 36 + PAD
 
-		``n_instances`` is accepted for backward compatibility but no longer
-		affects the result. We reserve the maximum scroll area upfront so the
-		widgets below it (Hull / Output Name / Format / Folder / action bar)
-		stay at fixed Y positions regardless of font instance count. Trade-off:
-		a font with one or two instances renders some empty scroll space, but
-		nothing overlaps and the window doesn't jump on font load.
-		"""
+	def _compute_window_height(self):
+		"""Return the total window height. v1.2.0 fixes the layout — no instance-count math."""
 		PAD = self.PAD
-		LABEL_H = self.LABEL_H
-		ROW = self.ROW
-		BTN_H = self.BTN_H
-		CHECK_H = self.CHECK_H
-		CHECK_GAP = self.CHECK_GAP
-		HULL_H = self.HULL_H
-
-		# Reserve max scroll height once at the layout level.
-		scroll_h = self.MAX_VISIBLE_INSTANCES * (CHECK_H + CHECK_GAP) + 8
-
-		# Mirrors every `y +=` in _build_window so changes stay in sync.
+		# PAD + zone1 + PAD + zone2 + PAD + zone3 + PAD + action_bar (36) + PAD
 		return (
-			PAD +
-			ROW + 6 +           # source radio
-			ROW + 8 +           # source-input row
-			12 +                # divider 1
-			LABEL_H + 6 +       # instances label
-			scroll_h + 8 +      # instances scroll
-			HULL_H + 8 +        # hull preview
-			12 +                # divider 2
-			ROW + 4 +           # output name
-			ROW + 4 +           # format
-			ROW + 8 +           # output folder
-			12 +                # divider 3
-			BTN_H + PAD         # action bar
+			PAD
+			+ self.ZONE1_H + PAD
+			+ self.ZONE2_H + PAD
+			+ self.ZONE3_H + PAD
+			+ 36 + PAD
 		)
 
 	# ------------------------------------------------------------------
-	# Event handlers
+	# Drag-drop installation
+	# ------------------------------------------------------------------
+
+	@objc.python_method
+	def _install_drop_handler(self):
+		"""Attach a _FontDropView overlay above the file path field."""
+		try:
+			field = self.w.fontPathField._nsObject
+		except (AttributeError, RuntimeError):
+			return
+		try:
+			frame = field.frame()
+			view = _FontDropView.alloc().initWithFrame_dialog_(frame, self)
+			if view is None:
+				return
+			superview = field.superview()
+			if superview is None:
+				return
+			superview.addSubview_positioned_relativeTo_(view, 1, field)  # NSWindowAbove = 1
+			self._drop_view = view
+		except (AttributeError, RuntimeError):
+			pass
+
+	# ------------------------------------------------------------------
+	# Keyboard shortcut monitor
+	# ------------------------------------------------------------------
+
+	@objc.python_method
+	def _install_shortcut_monitor(self):
+		"""Register an NSEvent local key-down monitor for ⌘A / ⌘D / ⌘I.
+
+		Return is already wired through generateButton's key-equivalent; Escape
+		is wired through cancelButton's. We add the bulk-select shortcuts here
+		because vanilla doesn't expose a key-equivalent API for small buttons.
+		"""
+		dialog_ref = self
+
+		def _handler(event):
+			try:
+				# Ignore events not targeting our window.
+				nswin = (
+					dialog_ref.w.getNSWindow()
+					if hasattr(dialog_ref.w, 'getNSWindow') else dialog_ref.w._window
+				)
+				if nswin is None or event.window() is not nswin:
+					return event
+				if not (event.modifierFlags() & NSCommandKeyMask):
+					return event
+				chars = event.charactersIgnoringModifiers()
+				if not chars:
+					return event
+				ch = chars.lower()
+				if ch == 'a':
+					dialog_ref._on_select_all(None)
+					return None
+				if ch == 'd':
+					dialog_ref._on_select_none(None)
+					return None
+				if ch == 'i':
+					dialog_ref._on_select_invert(None)
+					return None
+			except Exception:
+				pass
+			return event
+
+		try:
+			self._shortcut_monitor = NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+				NSEventMaskKeyDown, _handler,
+			)
+		except (AttributeError, RuntimeError):
+			self._shortcut_monitor = None
+
+	@objc.python_method
+	def _remove_shortcut_monitor(self):
+		"""Tear down the key-down monitor so the dialog can be GC'd."""
+		mon = self._shortcut_monitor
+		self._shortcut_monitor = None
+		if mon is None:
+			return
+		try:
+			NSEvent.removeMonitor_(mon)
+		except (AttributeError, RuntimeError):
+			pass
+
+	# ------------------------------------------------------------------
+	# Event handlers — source picker
 	# ------------------------------------------------------------------
 
 	def _on_browse(self, sender):
@@ -700,7 +1077,6 @@ class VFClampDialog:
 		panel.setCanChooseFiles_(True)
 		panel.setCanChooseDirectories_(False)
 		panel.setAllowsMultipleSelection_(False)
-		# Modern API: setAllowedContentTypes_ via UTType where available.
 		applied_modern = False
 		try:
 			from UniformTypeIdentifiers import UTType
@@ -715,7 +1091,6 @@ class VFClampDialog:
 		except Exception:
 			pass
 		if not applied_modern:
-			# Fallback for older macOS — extensions are matched case-insensitively
 			panel.setAllowedFileTypes_(['ttf', 'otf', 'woff', 'woff2'])
 		panel.setTitle_('Select a Variable Font')
 		panel.setPrompt_('Select')
@@ -723,10 +1098,6 @@ class VFClampDialog:
 		if result == NSModalResponseOK:
 			path = panel.URL().path()
 			self._load_font(path)
-
-	# ------------------------------------------------------------------
-	# Open-Glyphs-font source path (Phase 1+2)
-	# ------------------------------------------------------------------
 
 	@objc.python_method
 	def _refresh_gsfont_popup(self) -> None:
@@ -736,9 +1107,6 @@ class VFClampDialog:
 		if not fonts:
 			items = [self._GSFONT_POPUP_EMPTY]
 		else:
-			# Always include a leading sentinel so opening the popup is the
-			# explicit action that switches source mode — picking the first
-			# real entry shouldn't fire on mere refresh.
 			items = [self._GSFONT_POPUP_EMPTY] + [gsfont_label(f) for f in fonts]
 		try:
 			self.w.gsfontPopup.setItems(items)
@@ -749,7 +1117,6 @@ class VFClampDialog:
 	def _on_gsfont_chosen(self, sender: Any) -> None:
 		"""Handle a user selection from the open-Glyphs-font popup."""
 		idx = self.w.gsfontPopup.get()
-		# Index 0 is the sentinel "(no open Glyphs fonts)" / "—" entry.
 		if idx <= 0 or idx - 1 >= len(self._gsfont_options):
 			return
 		gsfont = self._gsfont_options[idx - 1]
@@ -757,29 +1124,18 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _set_source_mode_ui(self, mode: str) -> None:
-		"""Show the file row OR the gsfont popup, depending on ``mode``.
-
-		Both widget groups occupy the same Y position; only one is visible.
-		Also updates the leading "Source-input" label and refreshes the
-		format popup so .glyphs appears/disappears appropriately.
-
-		AppKit attribute errors are tolerated here so a partially-built window
-		(e.g. during construction before _build_window finishes) cannot crash
-		mode transitions.
-
-		This method is the *visibility-only* leaf. For a full source-mode
-		transition (clearing the inactive source's path/gsfont, resetting
-		the default output folder, etc.) call ``_transition_source_mode``
-		instead — it routes back through here after handling cross-source
-		state. See issue #44.
-		"""
+		"""Show the file row OR the gsfont popup, depending on ``mode``."""
 		is_file = (mode == self.SOURCE_FILE)
 		try:
 			self.w.fontPathField.show(is_file)
 			self.w.browseButton.show(is_file)
 			self.w.gsfontPopup.show(not is_file)
-			self.w.sourceInputLabel.set('File:' if is_file else 'Open Font:')
-			# Reflect mode on the radio without firing the callback.
+			# Keep drop overlay in sync with the path field visibility.
+			if self._drop_view is not None:
+				try:
+					self._drop_view.setHidden_(not is_file)
+				except Exception:
+					pass
 			self.w.sourceRadio.set(1 if is_file else 0)
 		except (AttributeError, RuntimeError):
 			pass
@@ -787,51 +1143,20 @@ class VFClampDialog:
 		self._refresh_format_popup()
 
 	@objc.python_method
-	def _transition_source_mode(self, mode: str, *, clear_inactive: bool = True, reset_folder: bool = False) -> None:
-		"""Switch ``_source_mode`` to ``mode`` and clear stale cross-source state.
-
-		Centralised transition (issue #44) — every place that needs to change
-		the active source funnels through here so checkbox state, file paths,
-		gsfont references, hull preview, and the default output folder cannot
-		drift out of sync with the visible widget set.
-
-		Arguments:
-
-		``clear_inactive`` (default True)
-			Wipe the *other* source's pointer (``_gsfont`` when switching to
-			file mode, ``_font_path`` when switching to gsfont mode) so a
-			subsequent generate call cannot accidentally use a stale source
-			the user has visually navigated away from. Set False when the
-			caller is itself about to populate the inactive source (e.g. the
-			__init__ default).
-
-		``reset_folder`` (default False)
-			Blank the output-folder field so the next load picks a default
-			rooted in the *new* source's folder rather than carrying the
-			previous source's path. Callers that want to preserve a user's
-			explicit folder pick set this False.
-		"""
-		# Always flip the visibility + format popup first so a downstream
-		# refresh sees the correct widget set.
+	def _transition_source_mode(
+		self, mode: str, *, clear_inactive: bool = True, reset_folder: bool = False,
+	) -> None:
+		"""Switch ``_source_mode`` to ``mode`` and clear stale cross-source state."""
 		self._set_source_mode_ui(mode)
-
 		if clear_inactive:
 			if mode == self.SOURCE_FILE:
-				# Switching INTO file mode → drop the gsfont reference. The
-				# gsfont popup is also reset to its sentinel so the visible
-				# selection matches the cleared state.
 				self._gsfont = None
 				try:
 					self.w.gsfontPopup.set(0)
 				except (AttributeError, RuntimeError):
 					pass
 			else:
-				# Switching INTO gsfont mode → drop the file-path reference
-				# and blank the field so the user sees the source has changed.
 				self._font_path = None
-				# Release the cached TTFont from the previous file-mode session
-				# — keeping it would leak the parsed tables and pin the disk
-				# file open until the dialog is closed.
 				try:
 					self._close_cached_font()
 				except AttributeError:
@@ -840,7 +1165,6 @@ class VFClampDialog:
 					self.w.fontPathField.set('')
 				except (AttributeError, RuntimeError):
 					pass
-
 		if reset_folder:
 			try:
 				self.w.folderField.set('')
@@ -851,33 +1175,23 @@ class VFClampDialog:
 		"""User toggled the Source: Open Font / File radio."""
 		idx = self.w.sourceRadio.get()
 		if idx == 0:  # Open Font
-			# Refresh the popup in case the user opened/closed Glyphs documents
-			# between dialog launch and now.
 			self._refresh_gsfont_popup()
 			if not self._gsfont_options:
 				self._set_status(
 					'No Glyphs fonts are currently open. Switch back to File or open one.',
 				)
-				# Even with no candidates we still transition so the UI matches
-				# the radio click. The transition clears any stale file path so
-				# the user's next move starts from a clean slate.
 				self._transition_source_mode(self.SOURCE_GSFONT)
 				return
 			self._transition_source_mode(self.SOURCE_GSFONT)
-			# Auto-select the most likely target so the user doesn't have to
-			# poke the popup as a second action.
 			self._auto_select_frontmost_gsfont()
-		else:  # File
+		else:
 			self._transition_source_mode(self.SOURCE_FILE)
 			self._set_status('')
 
 	def _on_cancel(self, sender):
 		"""Signal cancellation to any in-flight worker, then close the dialog."""
-		# Set the cancellation flag first so the worker thread can short-circuit
-		# before we tear down the window. The worker itself is daemonized so it
-		# won't outlive the process, but we don't want it to write a partial
-		# output file after the user has clicked Cancel.
 		self._cancelled = True
+		self._remove_shortcut_monitor()
 		try:
 			self.w.close()
 		except (AttributeError, RuntimeError):
@@ -885,20 +1199,7 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _auto_select_frontmost_gsfont(self) -> None:
-		"""Default to the frontmost open Glyphs font when the dialog opens.
-
-		When a font is open in Glyphs, the canonical entry point is "clamp this
-		open font as a new .glyphs file" — so we select it automatically and
-		default the Format popup to .glyphs. The user can still pick another
-		open font from the popup or click Browse to switch to a disk-file source.
-
-		Uses object identity (``is``) rather than ``in`` for the frontmost
-		match because GSFont's ``__eq__`` falls back to NSObject pointer
-		comparison; PyObjC can reissue wrappers for the same underlying Obj-C
-		object, so an ``in`` check may falsely report "not found" and silently
-		pick the wrong default. Falls back to the first listed font when there
-		is no identity match.
-		"""
+		"""Default to the frontmost open Glyphs font when the dialog opens."""
 		if not self._gsfont_options:
 			return
 		frontmost = None
@@ -913,7 +1214,6 @@ class VFClampDialog:
 					target = candidate
 					break
 		try:
-			# +1 for the sentinel row at popup index 0
 			idx = self._gsfont_options.index(target) + 1
 			self.w.gsfontPopup.set(idx)
 		except (ValueError, AttributeError, RuntimeError):
@@ -922,29 +1222,38 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _refresh_format_popup(self) -> None:
-		"""Set the Format popup items + canonical default for the active source mode.
-
-		Always resets to the per-mode default. The previous "preserve user's
-		selection" logic surfaced a real bug: switching from file mode (default
-		TTF) into Open-Font mode kept TTF selected because TTF appears in both
-		format sets, so users never saw `.glyphs` as the headline option. Reset-
-		on-mode-change is the obvious UX and matches the mode-radio click pattern.
-		"""
+		"""Set the Format popup items + canonical default for the active source mode."""
 		if self._source_mode == self.SOURCE_GSFONT:
 			items = list(self.GSFONT_FORMATS)
-			default_idx = 0  # .glyphs is the headline output for an open font
+			default_idx = 0
 		else:
 			items = list(self.BINARY_FORMATS)
-			default_idx = 0  # TTF
+			default_idx = 0
 		try:
 			self.w.formatPopup.setItems(items)
 			self.w.formatPopup.set(default_idx)
 		except Exception:
 			pass
+		self._refresh_format_description()
+
+	@objc.python_method
+	def _refresh_format_description(self):
+		"""Update the format description text beside the popup."""
+		try:
+			fmt = self._resolve_selected_format()
+			self.w.formatDescription.set(FORMAT_DESCRIPTIONS.get(fmt, ''))
+		except (AttributeError, RuntimeError):
+			pass
+
+	def _on_format_changed(self, sender):
+		"""User picked a new format — refresh description and preview name."""
+		self._refresh_format_description()
+		# Preview name shows the extension, so refresh too.
+		self._refresh_preview()
 
 	@objc.python_method
 	def _load_gsfont(self, gsfont: Any) -> None:
-		"""Switch the dialog to GSFont source mode and populate instance checkboxes."""
+		"""Switch the dialog to GSFont source mode and populate instance list."""
 		self._set_status('Loading open Glyphs font…')
 		try:
 			names = gsfont_instance_names(gsfont)
@@ -959,19 +1268,16 @@ class VFClampDialog:
 			)
 			return
 
-		# Route through the centralised transition (issue #44) so the file-side
-		# source is cleared and the visible widget set switches in one step.
-		# We then assign _gsfont AFTER the transition because _transition_source_mode
-		# clears the inactive source's pointer; setting _gsfont last anchors the
-		# just-loaded reference. _font_path is cleared by the transition so a
-		# stale file path can't survive into the next generate dispatch.
 		self._transition_source_mode(self.SOURCE_GSFONT)
 		self._gsfont = gsfont
-		self._instance_names = names
-		self._populate_instance_checks(names)
+		coords = self._extract_gsfont_instance_coords(gsfont, names)
+		axis_ranges = self._extract_gsfont_axis_ranges(gsfont)
+		self._fvar_axis_ranges = axis_ranges
+		self._source_size_bytes = None  # unknown for open Glyphs font
+		self._load_instances(names, coords)
 		self._name_overridden = False
 		self._refresh_name()
-		self._refresh_axis_preview()
+		self._refresh_preview()
 		self._refresh_generate_button()
 		self._set_status('')
 
@@ -985,42 +1291,238 @@ class VFClampDialog:
 		panel.setPrompt_('Choose')
 		result = panel.runModal()
 		if result == NSModalResponseOK:
-			self.w.folderField.set(panel.URL().path())
+			folder = panel.URL().path()
+			self.w.folderField.set(folder)
+			self._push_recent_folder(folder)
 
 	def _on_name_edited(self, sender):
-		"""Once the user touches the name field, stop auto-filling for the session."""
-		# First non-trivial edit "claims" the field; subsequent clears do not flip back
-		if self.w.nameField.get().strip():
+		"""Validate the edited name and stop auto-fill once the user touches it."""
+		current = self.w.nameField.get()
+		if current.strip():
 			self._name_overridden = True
+		err = validate_output_name(current)
+		# Surface inline via a tooltip on the field; success clears any prior tip.
+		try:
+			ns = self.w.nameField._nsObject
+			if err:
+				ns.setToolTip_(err)
+			else:
+				ns.setToolTip_('')
+		except (AttributeError, RuntimeError):
+			pass
+		# Show validation errors in the status bar so they're never missed.
+		if err and current.strip():
+			self._set_status(err, error=True)
+		else:
+			# Avoid clobbering unrelated status messages — only clear if the
+			# current message looks like a validation error.
+			try:
+				if str(self.w.statusLabel.get()).startswith('Error:'):
+					self._set_status('')
+			except Exception:
+				pass
+		# Mirror live into the preview text.
+		self._refresh_preview()
 
-	def _on_check_toggled(self, sender):
-		"""Update output name, axis preview, and Generate button state on toggle.
+	# ------------------------------------------------------------------
+	# Instance list — vanilla.List edit/selection handlers
+	# ------------------------------------------------------------------
 
-		Walks ``self._checks`` ONCE per toggle and threads the resulting selection
-		list through every downstream refresh — without this, a single click
-		incurs four O(N) bridge walks through the checkbox list (one per
-		refresh helper) plus a font re-parse in the axis preview.
-		"""
+	def _on_list_edit(self, sender):
+		"""vanilla.List editCallback — sync model with the user's checkbox edit."""
+		if self._suspend_list_edit_cb:
+			return
+		try:
+			items = sender.get()
+		except (AttributeError, RuntimeError):
+			items = []
+		# Each row in items maps via _visible_to_full to a full-list index.
+		for row_idx, item in enumerate(items):
+			if row_idx >= len(self._visible_to_full):
+				continue
+			full_idx = self._visible_to_full[row_idx]
+			try:
+				self._instance_checked[full_idx] = bool(item.get('checked'))
+			except (IndexError, AttributeError):
+				pass
 		selected = self._selected_instance_names()
 		self._refresh_name(selected=selected)
-		self._refresh_axis_preview(selected=selected)
+		self._refresh_preview(selected=selected)
+		self._refresh_generate_button(selected=selected)
+		self._refresh_selection_count(selected=selected)
+
+	def _on_list_selection(self, sender):
+		"""vanilla.List selectionCallback — currently unused but reserved."""
+		# Adjacent-select would consume sender.getSelection() here. Left as a
+		# stub so the wiring is in place when the feature lands.
+		return
+
+	def _on_filter_changed(self, sender):
+		"""SearchBox / EditText callback — update filter and rebuild the list."""
+		try:
+			self._instance_filter = (sender.get() or '').strip()
+		except (AttributeError, RuntimeError):
+			self._instance_filter = ''
+		self._refresh_list()
+
+	def _on_more_select(self, sender):
+		"""More-select dropdown — fan out to Italic / Roman helpers."""
+		try:
+			idx = sender.get()
+		except (AttributeError, RuntimeError):
+			idx = 0
+		if idx == 1:
+			self._select_indices(self._italic_indices())
+		elif idx == 2:
+			self._select_indices(self._roman_indices())
+		# Always reset back to the header label so the popup keeps its "menu"
+		# affordance — the picked option is a one-shot action.
+		try:
+			sender.set(0)
+		except (AttributeError, RuntimeError):
+			pass
+
+	# ------------------------------------------------------------------
+	# Instance model
+	# ------------------------------------------------------------------
+
+	@objc.python_method
+	def _load_instances(self, names: List[str], coords: List[Dict[str, float]]) -> None:
+		"""Populate the model + list view from a freshly loaded source."""
+		self._instance_names = list(names)
+		# coords may be shorter than names if extraction partially failed — pad
+		# with empty dicts so all parallel lookups stay safe.
+		coords_padded = list(coords) + [{} for _ in range(len(names) - len(coords))]
+		self._instance_coords = coords_padded[:len(names)]
+		self._instance_checked = [False] * len(names)
+		self._instance_filter = ''
+		# Surface the bulk-select helpers + filter now that we have data.
+		for widget in (
+			self.w.allBtn, self.w.noneBtn, self.w.invertBtn,
+			self.w.moreSelectBtn, self.w.filterBox,
+		):
+			try:
+				widget.show(True)
+			except (AttributeError, RuntimeError):
+				pass
+		# Clear filter UI back to empty when reloading a new source.
+		try:
+			self.w.filterBox.set('')
+		except (AttributeError, RuntimeError):
+			pass
+		self._refresh_list()
+		self._refresh_selection_count()
+
+	@objc.python_method
+	def _build_list_items(self) -> List[dict]:
+		"""Return the row dicts visible to the user (after filtering)."""
+		needle = (self._instance_filter or '').lower()
+		self._visible_to_full = []
+		items = []
+		for full_idx, name in enumerate(self._instance_names):
+			if needle and needle not in name.lower():
+				continue
+			self._visible_to_full.append(full_idx)
+			coord = self._instance_coords[full_idx] if full_idx < len(self._instance_coords) else {}
+			coord_summary = '  '.join(f'{tag}={val:g}' for tag, val in coord.items())
+			display = name if not coord_summary else f'{name}    {coord_summary}'
+			items.append({
+				'checked': self._instance_checked[full_idx],
+				'display': display,
+			})
+		return items
+
+	@objc.python_method
+	def _refresh_list(self) -> None:
+		"""Rebuild the vanilla.List item set, preserving the suspend guard."""
+		if not getattr(self, '_using_vanilla_list', False):
+			return
+		items = self._build_list_items()
+		self._suspend_list_edit_cb = True
+		try:
+			self.w.instanceList.set(items)
+		except (AttributeError, RuntimeError):
+			pass
+		finally:
+			self._suspend_list_edit_cb = False
+
+	@objc.python_method
+	def _selected_instance_names(self) -> List[str]:
+		"""Return names of instances whose row is checked."""
+		out = []
+		for name, checked in zip(self._instance_names, self._instance_checked):
+			if checked:
+				out.append(name)
+		return out
+
+	@objc.python_method
+	def _set_all_checks(self, value: bool) -> None:
+		"""Tick or untick every named instance (visible or not) and refresh."""
+		self._instance_checked = [bool(value)] * len(self._instance_names)
+		self._refresh_list()
+		selected = self._selected_instance_names()
+		self._refresh_name(selected=selected)
+		self._refresh_preview(selected=selected)
+		self._refresh_generate_button(selected=selected)
+		self._refresh_selection_count(selected=selected)
+
+	def _on_select_all(self, sender):
+		"""Tick every named-instance row."""
+		self._set_all_checks(True)
+
+	def _on_select_none(self, sender):
+		"""Untick every named-instance row."""
+		self._set_all_checks(False)
+
+	def _on_select_invert(self, sender):
+		"""Invert every named-instance row's check state."""
+		self._instance_checked = [not v for v in self._instance_checked]
+		self._refresh_list()
+		selected = self._selected_instance_names()
+		self._refresh_name(selected=selected)
+		self._refresh_preview(selected=selected)
 		self._refresh_generate_button(selected=selected)
 		self._refresh_selection_count(selected=selected)
 
 	@objc.python_method
-	def _refresh_selection_count(self, selected=None):
-		"""Update the Instances label with an 'N of M' count of selected rows.
+	def _select_indices(self, indices: List[int]) -> None:
+		"""Tick exactly the given full-list indices and refresh."""
+		self._instance_checked = [False] * len(self._instance_names)
+		for i in indices:
+			if 0 <= i < len(self._instance_checked):
+				self._instance_checked[i] = True
+		self._refresh_list()
+		selected = self._selected_instance_names()
+		self._refresh_name(selected=selected)
+		self._refresh_preview(selected=selected)
+		self._refresh_generate_button(selected=selected)
+		self._refresh_selection_count(selected=selected)
 
-		Keeps the label terse — 'Instances (3/8):' rather than a separate
-		status line — so the bottom status label remains free for transient
-		messages (Generating…, Saved:…, Error:…). Callers that have already
-		computed the selection list can pass it via ``selected`` to avoid a
-		second walk through the checkbox list.
-		"""
+	@objc.python_method
+	def _italic_indices(self) -> List[int]:
+		"""Indices of instances that look italic (by name OR coord)."""
+		out = []
+		pattern = re.compile(r'\b(italic|oblique|slanted)\b', re.IGNORECASE)
+		for i, name in enumerate(self._instance_names):
+			coord = self._instance_coords[i] if i < len(self._instance_coords) else {}
+			slnt = coord.get('slnt', 0)
+			ital = coord.get('ital', 0)
+			if pattern.search(name) or slnt < 0 or ital >= 0.5:
+				out.append(i)
+		return out
+
+	@objc.python_method
+	def _roman_indices(self) -> List[int]:
+		"""Complement of italic — indices of upright/roman instances."""
+		italics = set(self._italic_indices())
+		return [i for i in range(len(self._instance_names)) if i not in italics]
+
+	@objc.python_method
+	def _refresh_selection_count(self, selected=None):
+		"""Update the instance header with an 'N of M' count of selected rows."""
 		if not self._instance_names:
-			# Reset to bare label when there are no instances yet
 			try:
-				self.w.instanceLabel.set('Instances:')
+				self.w.instanceHeader.set('INSTANCES (0 OF 0)')
 			except (AttributeError, RuntimeError):
 				pass
 			return
@@ -1029,23 +1531,13 @@ class VFClampDialog:
 		count = len(selected)
 		total = len(self._instance_names)
 		try:
-			self.w.instanceLabel.set(f'Instances ({count}/{total}):')
+			self.w.instanceHeader.set(f'INSTANCES ({count} OF {total})')
 		except (AttributeError, RuntimeError):
 			pass
 
-	def _on_select_all(self, sender):
-		"""Tick every named-instance checkbox."""
-		self._set_all_checks(True)
-
-	def _on_select_none(self, sender):
-		"""Untick every named-instance checkbox."""
-		self._set_all_checks(False)
-
-	def _on_select_invert(self, sender):
-		"""Invert every named-instance checkbox."""
-		for cb in self._iter_checks():
-			cb.set(not cb.get())
-		self._on_check_toggled(sender)
+	# ------------------------------------------------------------------
+	# Reveal / format / status
+	# ------------------------------------------------------------------
 
 	def _on_reveal(self, sender):
 		"""Reveal the most recently saved font in Finder."""
@@ -1060,13 +1552,7 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _resolve_selected_format(self):
-		"""Read the Format popup and normalise the label to an internal token.
-
-		Returns one of the internal format tokens ('TTF', 'OTF', 'WOFF',
-		'WOFF2', 'GLYPHS'). The popup displays '.glyphs' for source output;
-		this helper maps the user-facing label to the internal 'GLYPHS' token
-		so downstream code only ever sees uppercase tokens.
-		"""
+		"""Read the Format popup and normalise the label to an internal token."""
 		try:
 			fmt_items = self.w.formatPopup.getItems()
 			fmt_index = self.w.formatPopup.get()
@@ -1077,13 +1563,7 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _validate_brotli_for_format(self, fmt):
-		"""Return an error message for WOFF2 output without brotli, else None.
-
-		Extracted (issue #59) so the WOFF2/brotli check stops entangling the
-		generate dispatcher with backend capability detection. Callers ask
-		"is this format viable right now?" and decide what to do with the
-		answer (status message, popup change, etc.).
-		"""
+		"""Return an error message for WOFF2 output without brotli, else None."""
 		if flavor_for_format(fmt) != 'woff2':
 			return None
 		try:
@@ -1099,14 +1579,12 @@ class VFClampDialog:
 	def _collect_generate_inputs(self):
 		"""Read every dialog input needed by generate; return params or an error.
 
-		Returns a tuple ``(params, error_message)`` where exactly one element
-		is non-None. ``params`` is a dict with keys ``selected``, ``family_name``,
-		``fmt``, ``output_path`` ready to hand to a generator. ``error_message``
-		is a single string the caller surfaces verbatim via _set_status.
-
-		Extracted (issue #59) so _on_generate stops being a god-method that
-		also owns validation, normalisation, brotli probing, and folder
-		fallback logic.
+		TODO(v1.3.0): multi-output. The npm package supports an
+		``outputs: [{name, instances}, …]`` array. Bringing that to the
+		Glyphs UI requires duplicating Zone 2 per output, which is larger
+		than every other v1.2.0 change combined. v1.2.0 ships the
+		zone restructure so v1.3.0 can swap the dashboard for a tabbed
+		variant without redoing zones 1 or 3. See the redesign plan.
 		"""
 		selected = self._selected_instance_names()
 		if not selected:
@@ -1115,11 +1593,13 @@ class VFClampDialog:
 		family_name = self.w.nameField.get().strip()
 		if not family_name:
 			return None, 'Enter an output name.'
+		name_err = validate_output_name(family_name)
+		if name_err is not None:
+			return None, name_err
 
 		fmt = self._resolve_selected_format()
 		ext = extension_for_format(fmt)
 
-		# Cross-source sanity check: .glyphs output requires an open-font source.
 		if fmt == 'GLYPHS' and self._source_mode != self.SOURCE_GSFONT:
 			return None, '.glyphs output requires using an open Glyphs font as the source.'
 
@@ -1140,20 +1620,18 @@ class VFClampDialog:
 		}, None
 
 	def _on_generate(self, sender):
-		"""Validate dialog input, then dispatch to the right source-path generator.
-
-		Reduced (issue #59) to two responsibilities: collect-or-error, and
-		dispatch. Each previously-inlined concern (selection check, name
-		check, format normalisation, brotli probe, folder fallback,
-		output-path safety) lives in its own helper above.
-		"""
+		"""Validate dialog input, then dispatch to the right source-path generator."""
 		params, err = self._collect_generate_inputs()
 		if err is not None:
 			self._set_status(err, error=True)
 			return
+		# Bump the output folder into the MRU as soon as we know we'll write to it.
+		try:
+			folder = str(Path(params['output_path']).parent)
+			self._push_recent_folder(folder)
+		except Exception:
+			pass
 
-		# Dispatch to the appropriate generator. Both paths share the same
-		# UI lifecycle via _begin_generate_ui (issue #58).
 		if self._source_mode == self.SOURCE_GSFONT:
 			self._generate_from_gsfont(
 				params['selected'], params['family_name'], params['fmt'], params['output_path'],
@@ -1165,13 +1643,7 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _default_output_folder(self) -> str:
-		"""Return a sensible default output folder when the user has not chosen one.
-
-		Uses ``pathlib.Path`` for the gsfont- and file-source folder derivations
-		(issue #79 partial migration). The return type is still ``str`` because
-		downstream consumers (vanilla EditText, safe_output_path) all expect a
-		plain string path.
-		"""
+		"""Return a sensible default output folder when the user has not chosen one."""
 		if self._source_mode == self.SOURCE_GSFONT and self._gsfont is not None:
 			try:
 				fp = self._gsfont.filepath
@@ -1185,18 +1657,7 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _begin_generate_ui(self):
-		"""Spin up the shared 'Generate is in flight' UI state.
-
-		Extracted (issue #58) so the two source-path dispatchers don't
-		each copy the same five-line spinner/Generate/Reveal/disable block.
-		The two paths still use different concurrency models — the file path
-		runs in a worker thread, the gsfont path stays on the main thread
-		because Glyphs APIs require it — but the *UI* lifecycle is identical
-		and now lives in one place.
-
-		Resets the cancellation flag too so a prior Cancel click doesn't
-		short-circuit this generate.
-		"""
+		"""Spin up the shared 'Generate is in flight' UI state."""
 		self._cancelled = False
 		self._set_status('Generating…')
 		try:
@@ -1211,16 +1672,7 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _generate_from_file(self, selected, family_name, fmt, output_path):
-		"""File-source path — uses fontTools instancer in a worker thread.
-
-		Concurrency note (issue #58): we deliberately run fontTools in a
-		background thread here. The fontTools instancer is pure-Python /
-		fontTools and does not require the main runloop, so blocking the
-		dialog would be a UX regression. The companion gsfont path stays on
-		the main thread because Glyphs' Python API is main-thread-only.
-		Both paths share the same _begin_generate_ui / _on_generate_success
-		/ _on_generate_failure UI lifecycle.
-		"""
+		"""File-source path — uses fontTools instancer in a worker thread."""
 		font_path = self._font_path
 		self._begin_generate_ui()
 		dialog_ref = self
@@ -1239,9 +1691,6 @@ class VFClampDialog:
 				AppHelper.callAfter(dialog_ref._on_generate_failure, str(e))
 			else:
 				if dialog_ref._cancelled:
-					# Best-effort cleanup of a partial output file the user
-					# no longer wants. Quiet failure is intentional — the user
-					# already saw the Cancel they asked for.
 					try:
 						out_path_obj = Path(output_path)
 						if out_path_obj.exists():
@@ -1255,32 +1704,13 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _generate_from_gsfont(self, selected: List[str], family_name: str, fmt: str, output_path: str) -> None:
-		"""Open-font-source path — runs on the main thread (Glyphs APIs require it).
-
-		For ``.glyphs`` output we just clamp + save. For binary outputs we route
-		through Glyphs' native export pipeline (Variable Font Setting + generate).
-
-		Concurrency note (issue #58): we deliberately stay on the main thread
-		here. Glyphs' Python scripting API is not thread-safe — calling
-		``Glyphs.open`` or ``GSInstance.generate`` from a background thread
-		races with NSDocument internals and crashes the app. We defer the
-		heavy work to the next runloop tick via ``AppHelper.callAfter`` so
-		the spinner and status label paint before the main thread blocks.
-
-		The companion file path runs in a worker thread because fontTools is
-		main-thread-agnostic. Both paths share the same _begin_generate_ui /
-		_on_generate_success / _on_generate_failure UI lifecycle.
-		"""
+		"""Open-font-source path — runs on the main thread (Glyphs APIs require it)."""
 		gsfont = self._gsfont
 		if gsfont is None:
 			self._set_status('No open Glyphs font selected.', error=True)
 			return
 
 		self._begin_generate_ui()
-
-		# Defer the long Glyphs.open / generate sequence so the spinner and
-		# status label paint before the main thread blocks. Without this,
-		# the user sees a hung dialog with no feedback for several seconds.
 		AppHelper.callAfter(
 			self._run_gsfont_generate, gsfont, selected, family_name, fmt, output_path
 		)
@@ -1315,7 +1745,6 @@ class VFClampDialog:
 	@objc.python_method
 	def _on_generate_success(self, path):
 		"""Main-thread handler invoked after a successful generate."""
-		# Bail if the dialog window was already closed
 		if not self._alive():
 			return
 		self._last_output_path = path
@@ -1324,7 +1753,6 @@ class VFClampDialog:
 			self.w.revealButton.show(True)
 		except Exception:
 			pass
-		# Show a path scrubbed to ~ for readability and minor info-leak hygiene
 		display = path.replace(os.path.expanduser('~'), '~', 1)
 		self._set_status(f'Saved: {display}')
 		self.w.generateButton.enable(True)
@@ -1338,15 +1766,10 @@ class VFClampDialog:
 		"""Main-thread handler invoked after a generate failure."""
 		if not self._alive():
 			return
-		# Scrub the user's home dir and the temp-dir prefix so we don't leak
-		# absolute paths into the dialog or Macro Panel log.
 		scrubbed = message.replace(os.path.expanduser('~'), '~')
 		scrubbed = scrubbed.replace('/var/folders/', '/<tmp>/').replace('/private/var/folders/', '/<tmp>/')
-		# _set_status(error=True) already prepends "Error:" — don't double it.
 		self._set_status(scrubbed, error=True)
 		self.w.generateButton.enable(True)
-		# Hide the Reveal button after a failure so it can't surface a stale
-		# prior output that no longer corresponds to the current selection.
 		try:
 			self.w.revealButton.enable(False)
 			self.w.revealButton.show(False)
@@ -1358,11 +1781,7 @@ class VFClampDialog:
 			pass
 
 	def _alive(self):
-		"""Return True if the dialog's underlying NSWindow is still around.
-
-		Uses vanilla's public ``getNSWindow()`` accessor where available and
-		falls back to ``_window`` only if the public accessor is missing.
-		"""
+		"""Return True if the dialog's underlying NSWindow is still around."""
 		try:
 			win = self.w.getNSWindow() if hasattr(self.w, 'getNSWindow') else self.w._window
 			return win is not None and bool(win.isVisible())
@@ -1375,7 +1794,7 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _load_font(self, path):
-		"""Parse the font at path, populate the checkbox list, and refresh UI."""
+		"""Parse the font at path, populate the list, and refresh UI."""
 		self._set_status('Loading…')
 		try:
 			names = get_instance_names(path)
@@ -1393,45 +1812,39 @@ class VFClampDialog:
 			self._set_status(f'Unexpected error: {e}', error=True)
 			return
 
-		# Route through the centralised transition (issue #44). It clears the
-		# gsfont reference, resets the gsfont popup to its sentinel, and flips
-		# widget visibility — replacing the ad-hoc setattr+setter pair this
-		# function used to do inline.
 		self._transition_source_mode(self.SOURCE_FILE)
 		self._font_path = path
-		self._instance_names = names
-		# Cache the parsed TTFont so subsequent checkbox toggles can read fvar
-		# axis hulls without re-opening the disk file and re-parsing fontTools
-		# tables. The cache is keyed by path; switching to a different font
-		# clears it via _close_cached_font.
+
+		# Source file size — drives the size-estimate heuristic.
+		try:
+			self._source_size_bytes = os.path.getsize(path)
+		except OSError:
+			self._source_size_bytes = None
+
 		self._close_cached_font()
 		try:
 			self._cached_font = open_font_safely(path)
 		except Exception:
-			# Fall through silently: _refresh_axis_preview re-opens on demand
-			# when the cache is None.
 			self._cached_font = None
 		self.w.fontPathField.set(path)
 		self._set_status('')
-		self._populate_instance_checks(names)
+
+		# Extract per-instance coords + axis ranges for the dashboard.
+		coords = self._extract_ttfont_instance_coords(self._cached_font, names)
+		self._fvar_axis_ranges = self._extract_ttfont_axis_ranges(self._cached_font)
+		self._load_instances(names, coords)
 
 		if not self.w.folderField.get().strip():
-			# pathlib for the file-source folder default (issue #79 partial).
 			self.w.folderField.set(str(Path(path).parent))
 
 		self._name_overridden = False
 		self._refresh_name()
-		self._refresh_axis_preview()
+		self._refresh_preview()
 		self._refresh_generate_button()
 
 	@objc.python_method
 	def _close_cached_font(self):
-		"""Release the cached TTFont so the next ``_load_font`` reads fresh.
-
-		Best-effort — fontTools' TTFont does not require explicit close, but
-		dropping the reference lets the garbage collector reclaim the parsed
-		tables immediately when the user switches fonts.
-		"""
+		"""Release the cached TTFont so the next ``_load_font`` reads fresh."""
 		cached = getattr(self, '_cached_font', None)
 		if cached is None:
 			return
@@ -1443,143 +1856,147 @@ class VFClampDialog:
 			pass
 		self._cached_font = None
 
+	# ------------------------------------------------------------------
+	# Axis / instance coord extraction
+	# ------------------------------------------------------------------
+
 	@objc.python_method
-	def _populate_instance_checks(self, names):
-		"""Build one CheckBox per named instance inside a scrollable Group.
-
-		Holds the CheckBox widgets in ``self._checks`` (a flat list parallel to
-		``self._instance_names``). Vanilla still requires the widgets to be
-		attached to their parent Group as named attributes so that AppKit retains
-		them and the document view's autorelease pool sees them, but the names
-		are an internal implementation detail — public iteration goes through
-		the list, never ``getattr``.
-		"""
-		self.w.instancePlaceholder.show(False)
-		# Surface the bulk-select helpers now that we have something to select.
-		for btn_widget in (self.w.allBtn, self.w.noneBtn, self.w.invertBtn):
-			try:
-				btn_widget.show(True)
-			except (AttributeError, RuntimeError):
-				pass
-
-		n = len(names)
-		check_row = self.CHECK_H + self.CHECK_GAP
-		inner_h = n * check_row + self.CHECK_GAP
-		visible_rows = max(1, min(n, 8))
-		scroll_h = visible_rows * check_row + self.CHECK_GAP
-
-		# Scroll widget was built at its maximum size in _build_window — no
-		# resize needed here. This is the key change that prevents the scroll
-		# area from growing downward and overlapping the rows below it.
-
-		# Compute the document view width from the now-correct clip view size,
-		# minus a scrollbar reserve so content + scrollbar fit together.
-		# Window width 540 - CONTROL_X (138) - PAD (16) = 386 visible clip width.
-		# Subtract 18 px scrollbar reserve = 368 px usable.
-		group_width = self.W - self.CONTROL_X - self.PAD - 18
-		inner_group = vanilla.Group((0, 0, group_width, inner_h))
-		self._checks = []
-		for idx, name in enumerate(names):
-			y = self.CHECK_GAP + idx * check_row
-			cb = vanilla.CheckBox(
-				(8, y, group_width - 16, self.CHECK_H),
-				name,
-				value=False,
-				callback=self._on_check_toggled,
-			)
-			# Attach to the parent group so AppKit retains the widget. The
-			# attribute name is local to this build only — never read elsewhere.
-			setattr(inner_group, f'_cb_{idx}', cb)
-			self._checks.append(cb)
-
-		# Accessibility: VoiceOver reads checkbox labels but the cell is wrapped
-		# in a custom NSScrollView document view, so the row group itself benefits
-		# from an explicit role description.
-		for cb, name in zip(self._checks, names):
-			try:
-				cb._nsObject.setAccessibilityLabel_(
-					f'Include {name} instance'
-				)
-			except (AttributeError, RuntimeError):
-				pass
-
-		self._inner_group = inner_group
-
-		# Swap the document view. Explicitly set the inner_group's frame in
-		# clip-view coordinates first, then ask the scroll view to relayout via
-		# tile() + reflectScrolledClipView_ — without these, NSScrollView can
-		# leave the old placeholder's scroll range in place and the new content
-		# renders but is invisible behind the empty scroll area.
+	def _extract_ttfont_instance_coords(self, font, names):
+		"""Return parallel list of per-instance coord dicts for fvar instances."""
+		coords = [{} for _ in names]
+		if font is None:
+			return coords
 		try:
-			scroll_ns = self.w.instanceScroll._nsObject
-			old_doc = scroll_ns.documentView()
-			if old_doc is not None and old_doc is not inner_group._nsObject:
-				old_doc.removeFromSuperview()
-			try:
-				from Foundation import NSMakeRect, NSMakePoint  # type: ignore
-				inner_group._nsObject.setFrame_(NSMakeRect(0, 0, group_width, inner_h))
-			except (ImportError, AttributeError):
-				pass
-			scroll_ns.setDocumentView_(inner_group._nsObject)
-			# Force NSScrollView to recompute its scroll range and redisplay.
-			try:
-				scroll_ns.tile()
-				scroll_ns.reflectScrolledClipView_(scroll_ns.contentView())
-				scroll_ns.setNeedsDisplay_(True)
-				inner_group._nsObject.setNeedsDisplay_(True)
-			except AttributeError:
-				pass
+			fvar = font['fvar']
+			name_table = font['name']
 		except Exception:
-			# Last-resort: leave previous doc view in place rather than crash.
-			pass
-
-		self.w.instanceScroll.show(True)
-		# Surface the initial 0/N count.
-		self._refresh_selection_count()
-
-		new_h = self._compute_window_height(n)
-		# Only call resize when the height actually changes — vanilla.resize
-		# triggers a real AppKit layout pass even when the size is unchanged.
+			return coords
+		# Re-use core's disambiguation so labels match.
 		try:
-			current_size = self.w.getPosSize()
-			current_h = current_size[3] if len(current_size) >= 4 else None
-		except (AttributeError, RuntimeError):
-			current_h = None
-		if current_h != new_h:
-			self.w.resize(self.W, new_h)
+			from core import _disambiguated_instance_labels
+		except Exception:
+			return coords
+		name_to_coord = {}
+		try:
+			for inst, label in _disambiguated_instance_labels(name_table, fvar.instances):
+				name_to_coord[label] = dict(inst.coordinates)
+		except Exception:
+			return coords
+		for i, n in enumerate(names):
+			coords[i] = name_to_coord.get(n, {})
+		return coords
+
+	@objc.python_method
+	def _extract_ttfont_axis_ranges(self, font):
+		"""Return ``{tag: (min, default, max)}`` from an fvar table, or {}."""
+		if font is None:
+			return {}
+		try:
+			fvar = font['fvar']
+		except Exception:
+			return {}
+		out = {}
+		for ax in fvar.axes:
+			try:
+				out[ax.axisTag] = (
+					float(ax.minValue), float(ax.defaultValue), float(ax.maxValue),
+				)
+			except (AttributeError, ValueError):
+				continue
+		return out
+
+	@objc.python_method
+	def _extract_gsfont_instance_coords(self, gsfont, names):
+		"""Return parallel list of per-instance coord dicts for GSInstances."""
+		coords = [{} for _ in names]
+		try:
+			axis_tags = [getattr(ax, 'axisTag', '') or '' for ax in gsfont.axes]
+		except Exception:
+			return coords
+		name_to_coord = {}
+		try:
+			for inst in gsfont.instances:
+				# Skip Variable Font Settings — they aren't picker rows.
+				try:
+					from gsfont_core import _is_variable_instance
+					if _is_variable_instance(inst):
+						continue
+				except Exception:
+					pass
+				name = (inst.name or '').strip()
+				if not name:
+					continue
+				try:
+					vals = list(inst.axes)
+				except Exception:
+					vals = []
+				d = {}
+				for tag, val in zip(axis_tags, vals):
+					if tag:
+						try:
+							d[tag] = float(val)
+						except (TypeError, ValueError):
+							continue
+				name_to_coord[name] = d
+		except Exception:
+			return coords
+		for i, n in enumerate(names):
+			coords[i] = name_to_coord.get(n, {})
+		return coords
+
+	@objc.python_method
+	def _extract_gsfont_axis_ranges(self, gsfont):
+		"""Return ``{tag: (min, default, max)}`` derived from GSInstance coords.
+
+		GSFont's axes don't expose min/max directly the way fvar does — we
+		approximate the design space from the min/max of static instance
+		coordinates on each axis. This is good enough for the hull plot
+		because the hull is always a subset of that range.
+		"""
+		out = {}
+		try:
+			axis_tags = [getattr(ax, 'axisTag', '') or '' for ax in gsfont.axes]
+		except Exception:
+			return out
+		try:
+			from gsfont_core import _is_variable_instance
+		except Exception:
+			_is_variable_instance = lambda inst: False  # noqa: E731
+		bounds = {}
+		try:
+			for inst in gsfont.instances:
+				if _is_variable_instance(inst):
+					continue
+				try:
+					vals = list(inst.axes)
+				except Exception:
+					continue
+				for tag, val in zip(axis_tags, vals):
+					if not tag:
+						continue
+					try:
+						v = float(val)
+					except (TypeError, ValueError):
+						continue
+					if tag not in bounds:
+						bounds[tag] = [v, v]
+					else:
+						bounds[tag][0] = min(bounds[tag][0], v)
+						bounds[tag][1] = max(bounds[tag][1], v)
+		except Exception:
+			return out
+		for tag, (lo, hi) in bounds.items():
+			default = lo if lo == hi else (lo + hi) / 2
+			out[tag] = (lo, default, hi)
+		return out
 
 	# ------------------------------------------------------------------
-	# Helpers
+	# Output preview helpers (preview name, hull plot, size estimate)
 	# ------------------------------------------------------------------
-
-	def _iter_checks(self):
-		"""Yield every CheckBox widget."""
-		for cb in self._checks:
-			yield cb
-
-	def _set_all_checks(self, value):
-		"""Set every checkbox to ``value`` and refresh dependent UI."""
-		for cb in self._iter_checks():
-			cb.set(bool(value))
-		self._on_check_toggled(None)
-
-	def _selected_instance_names(self):
-		"""Return names of instances whose checkbox is ticked."""
-		if not self._checks:
-			return []
-		selected = []
-		for name, cb in zip(self._instance_names, self._checks):
-			if cb and cb.get():
-				selected.append(name)
-		return selected
 
 	@objc.python_method
 	def _refresh_name(self, selected=None):
-		"""Auto-compute the output name unless the user has overridden it.
-
-		Callers that already walked the checkbox list can pass ``selected`` to
-		avoid an extra O(N) bridge walk.
-		"""
+		"""Auto-compute the output name unless the user has overridden it."""
 		if self._name_overridden:
 			return
 		if selected is None:
@@ -1592,55 +2009,107 @@ class VFClampDialog:
 			os.path.splitext(os.path.basename(self._font_path))[0]
 			if self._font_path else ''
 		)
+		# Fall back to the open GSFont's family name when there's no file path.
+		if not base and self._source_mode == self.SOURCE_GSFONT and self._gsfont is not None:
+			try:
+				base = self._gsfont.familyName or ''
+			except Exception:
+				base = ''
 		computed = compute_default_output_name(base, selected[0], selected[-1])
 		self.w.nameField.set(computed.strip())
 
 	@objc.python_method
-	def _refresh_axis_preview(self, selected=None):
-		"""Render the axis hull as colored ■-prefixed chips, one axis per line.
+	def _refresh_preview(self, selected=None):
+		"""Update the preview name, hull plot, and size estimate."""
+		# Preview name — show the live nameField value with the active extension.
+		try:
+			current_name = self.w.nameField.get().strip()
+		except (AttributeError, RuntimeError):
+			current_name = ''
+		try:
+			fmt = self._resolve_selected_format()
+			ext = extension_for_format(fmt)
+		except Exception:
+			ext = 'ttf'
+		display = f'{current_name}.{ext}' if current_name else '(set output name)'
+		try:
+			self.w.previewName.set(display)
+		except (AttributeError, RuntimeError):
+			pass
 
-		Uses the parsed TTFont cached by ``_load_font`` rather than re-parsing
-		the disk file on every checkbox toggle. Callers that already computed
-		the selection list can pass it via ``selected``.
-		"""
 		if selected is None:
 			selected = self._selected_instance_names()
-		if not selected:
-			self._set_hull_text('(select instances to preview)')
-			return
+		hull = self._compute_current_hull(selected)
+		self._render_hull(hull)
+		self._refresh_size_estimate(selected)
 
-		hull = {}
+	@objc.python_method
+	def _compute_current_hull(self, selected):
+		"""Return the per-axis (lo, hi) hull for the current selection."""
+		if not selected:
+			return {}
 		try:
 			if self._source_mode == self.SOURCE_GSFONT and self._gsfont is not None:
-				hull = compute_gsfont_hull(self._gsfont, selected)
-			elif self._font_path:
+				return compute_gsfont_hull(self._gsfont, selected)
+			if self._font_path:
 				cached = getattr(self, '_cached_font', None)
 				if cached is not None:
-					hull = get_axis_hull_from_instances(cached, selected)
-				else:
-					# Fallback for callers that bypass _load_font's cache populate.
-					import contextlib as _cl
-					with _cl.closing(open_font_safely(self._font_path)) as f:
-						hull = get_axis_hull_from_instances(f, selected)
-			else:
-				self._set_hull_text('(load a font to preview)')
-				return
-		except Exception as e:
-			self._set_hull_text(f'(unavailable: {e})')
-			return
+					return get_axis_hull_from_instances(cached, selected)
+				import contextlib as _cl
+				with _cl.closing(open_font_safely(self._font_path)) as f:
+					return get_axis_hull_from_instances(f, selected)
+		except Exception:
+			return {}
+		return {}
 
+	@objc.python_method
+	def _render_hull(self, hull):
+		"""Show the custom plot for 1-2 axes; fall back to chips otherwise."""
+		# Default: chips visible, plot hidden.
+		use_plot = (
+			self._hull_plot_view is not None
+			and hull
+			and 1 <= len(hull) <= 2
+		)
+		if use_plot:
+			try:
+				self.w.hullChips.show(False)
+			except (AttributeError, RuntimeError):
+				pass
+			axis_colors = {tag: _rgb_for_axis(tag) for tag in hull.keys()}
+			try:
+				self._hull_plot_view.setHull_axisRanges_axisColors_(
+					hull, self._fvar_axis_ranges, axis_colors,
+				)
+				self._hull_plot_view.setHidden_(False)
+			except Exception:
+				# Plot failed for some reason — fall back to chips below.
+				use_plot = False
+
+		if not use_plot:
+			try:
+				if self._hull_plot_view is not None:
+					self._hull_plot_view.setHidden_(True)
+			except Exception:
+				pass
+			try:
+				self.w.hullChips.show(True)
+			except (AttributeError, RuntimeError):
+				pass
+			self._set_chips_text(hull)
+
+	@objc.python_method
+	def _set_chips_text(self, hull):
+		"""Render the axis hull as colored ■-prefixed chips in win.hullChips."""
 		if not hull:
-			self._set_hull_text('(no axes)')
+			self._set_chips_placeholder('(select instances to preview)')
 			return
 
-		# Build an attributed string: per-axis line is "■  TAG  lo–hi" where the
-		# leading ■ is colored by the per-axis palette, the tag stays uppercase
-		# and bold-ish, and the range trails in muted text.
 		attr = NSMutableAttributedString.alloc().init()
 		small_font = NSFont.systemFontOfSize_(NSFont.smallSystemFontSize())
 		mono_font = NSFont.monospacedDigitSystemFontOfSize_weight_(
 			NSFont.smallSystemFontSize(),
-			0.0,  # NSFontWeightRegular
+			0.0,
 		)
 		muted = NSColor.secondaryLabelColor()
 		label = NSColor.labelColor()
@@ -1652,7 +2121,6 @@ class VFClampDialog:
 					NSAttributedString.alloc().initWithString_attributes_('\n', {})
 				)
 			first = False
-			# Colored square
 			attr.appendAttributedString_(
 				NSAttributedString.alloc().initWithString_attributes_(
 					'■  ',
@@ -1662,7 +2130,6 @@ class VFClampDialog:
 					},
 				)
 			)
-			# Tag name in primary text color
 			attr.appendAttributedString_(
 				NSAttributedString.alloc().initWithString_attributes_(
 					f'{tag}',
@@ -1672,7 +2139,6 @@ class VFClampDialog:
 					},
 				)
 			)
-			# Range trailing in muted color, monospaced digits for alignment
 			a = f'{lo:g}'
 			b = f'{hi:g}'
 			range_text = f'  pinned at {a}' if a == b else f'  {a} – {b}'
@@ -1687,21 +2153,15 @@ class VFClampDialog:
 			)
 
 		try:
-			self.w.axisPreview._nsObject.setAttributedStringValue_(attr)
+			self.w.hullChips._nsObject.setAttributedStringValue_(attr)
 		except Exception:
-			# Fall back to plain text if attributed rendering is unavailable
-			# on this Glyphs build.
 			parts = []
 			for tag, (lo, hi) in hull.items():
 				a = f'{lo:g}'
 				b = f'{hi:g}'
 				parts.append(f'{tag} {a}' if a == b else f'{tag} {a}–{b}')
-			self.w.axisPreview.set('  ·  '.join(parts))
+			self.w.hullChips.set('  ·  '.join(parts))
 
-		# Accessibility: VoiceOver would otherwise read the leading "■"
-		# as "black square" for every axis. Expose a clean axis-by-axis
-		# summary as the accessibility value instead (the colored chip is
-		# a redundant visual cue — WCAG 1.4.1 prohibits color-only encoding).
 		ax_parts = []
 		for tag, (lo, hi) in hull.items():
 			a = f'{lo:g}'
@@ -1712,14 +2172,14 @@ class VFClampDialog:
 				ax_parts.append(f'{tag} {a} to {b}')
 		ax_summary = '; '.join(ax_parts) if ax_parts else 'No axes'
 		try:
-			self.w.axisPreview._nsObject.setAccessibilityLabel_('Axis hull')
-			self.w.axisPreview._nsObject.setAccessibilityValue_(ax_summary)
+			self.w.hullChips._nsObject.setAccessibilityLabel_('Axis hull')
+			self.w.hullChips._nsObject.setAccessibilityValue_(ax_summary)
 		except (AttributeError, RuntimeError):
 			pass
 
 	@objc.python_method
-	def _set_hull_text(self, text):
-		"""Set the hull preview to plain placeholder/error text in muted style."""
+	def _set_chips_placeholder(self, text):
+		"""Render the muted placeholder text inside the chips area."""
 		try:
 			attr = NSAttributedString.alloc().initWithString_attributes_(
 				text,
@@ -1728,16 +2188,34 @@ class VFClampDialog:
 					NSFontAttributeName: NSFont.systemFontOfSize_(NSFont.smallSystemFontSize()),
 				},
 			)
-			self.w.axisPreview._nsObject.setAttributedStringValue_(attr)
+			self.w.hullChips._nsObject.setAttributedStringValue_(attr)
 		except Exception:
-			self.w.axisPreview.set(text)
+			self.w.hullChips.set(text)
+
+	@objc.python_method
+	def _refresh_size_estimate(self, selected):
+		"""Update the size-estimate line beside the hull plot."""
+		if not selected:
+			text = ''
+		else:
+			n = len(selected)
+			total = max(1, len(self._instance_names))
+			# Simple heuristic — output ≈ source * ratio (clamped 30%-100%).
+			# Glyphs sources don't expose the eventual binary size so we
+			# only show a count when there's no source size to scale from.
+			if self._source_size_bytes is not None:
+				ratio = max(0.3, min(1.0, n / total))
+				size_kb = int(self._source_size_bytes * ratio / 1024)
+				text = f'~{size_kb:,} KB · {n} instance{"s" if n != 1 else ""}'
+			else:
+				text = f'{n} instance{"s" if n != 1 else ""} selected'
+		try:
+			self.w.sizeEstimate.set(text)
+		except (AttributeError, RuntimeError):
+			pass
 
 	def _refresh_generate_button(self, selected=None):
-		"""Enable Generate only when a source is loaded and >=1 instance selected.
-
-		Callers that already walked the checkbox list can pass ``selected`` to
-		avoid an extra O(N) bridge walk.
-		"""
+		"""Enable Generate only when a source is loaded and >=1 instance selected."""
 		source_loaded = (
 			self._font_path is not None
 			or (self._source_mode == self.SOURCE_GSFONT and self._gsfont is not None)
@@ -1750,9 +2228,188 @@ class VFClampDialog:
 	@objc.python_method
 	def _set_status(self, message, error=False):
 		"""Update the status label. Errors are prefixed with 'Error:'."""
-		# Prefer text-only prefix over emoji; emoji renders as .notdef on older macOS.
 		text = f'Error: {message}' if error else message
 		self.w.statusLabel.set(text)
+
+	# ------------------------------------------------------------------
+	# Presets
+	# ------------------------------------------------------------------
+
+	@objc.python_method
+	def _refresh_presets_popup(self):
+		"""Repopulate the preset popup from the in-memory preset store."""
+		names = sorted(self._presets.keys(), key=lambda s: s.lower())
+		items = [self._PRESET_NONE_LABEL, self._PRESET_SAVE_LABEL, self._PRESET_MANAGE_LABEL]
+		items.extend(names)
+		try:
+			self.w.presetPopup.setItems(items)
+			self.w.presetPopup.set(0)
+		except (AttributeError, RuntimeError):
+			pass
+
+	def _on_preset_chosen(self, sender):
+		"""Dispatch the preset popup to Save / Manage / Apply."""
+		try:
+			idx = sender.get()
+			items = sender.getItems()
+		except (AttributeError, RuntimeError):
+			return
+		if idx == 0:
+			return
+		if idx == 1:
+			self._open_save_preset_dialog()
+			# Reset to (no preset) so picking 'Save…' again next time works.
+			try:
+				sender.set(0)
+			except (AttributeError, RuntimeError):
+				pass
+			return
+		if idx == 2:
+			self._open_manage_presets_dialog()
+			try:
+				sender.set(0)
+			except (AttributeError, RuntimeError):
+				pass
+			return
+		# User-defined preset
+		if idx < len(items):
+			self._apply_preset(items[idx])
+
+	@objc.python_method
+	def _apply_preset(self, name):
+		"""Apply a preset by name — select instances, set output name + format."""
+		preset = self._presets.get(name)
+		if preset is None:
+			return
+		wanted = set(preset.get('instances', []))
+		self._instance_checked = [n in wanted for n in self._instance_names]
+		self._refresh_list()
+		# Output name: only auto-apply if the user hasn't typed their own.
+		fmt = preset.get('format', '')
+		if fmt:
+			try:
+				items = self.w.formatPopup.getItems()
+				if fmt in items:
+					self.w.formatPopup.set(items.index(fmt))
+			except (AttributeError, RuntimeError):
+				pass
+		# Refresh chain
+		selected = self._selected_instance_names()
+		self._refresh_name(selected=selected)
+		self._refresh_format_description()
+		self._refresh_preview(selected=selected)
+		self._refresh_generate_button(selected=selected)
+		self._refresh_selection_count(selected=selected)
+
+	def _open_save_preset_dialog(self):
+		"""Prompt for a preset name and persist the current selection/format."""
+		selected = self._selected_instance_names()
+		if not selected:
+			self._set_status('Select at least one instance before saving a preset.', error=True)
+			return
+		try:
+			fmt = self._resolve_selected_format()
+		except Exception:
+			fmt = 'TTF'
+		# Cheap-and-cheerful prompt — vanilla doesn't expose AskString in every
+		# Glyphs build, so we use AppKit's Message + saved-name fallback.
+		try:
+			from vanilla.dialogs import askString
+			name = askString('Save Preset', 'Name this preset:', '')
+		except Exception:
+			name = None
+		if not name:
+			return
+		name = name.strip()
+		if not name:
+			return
+		self._presets[name] = make_preset(name, selected, fmt)
+		try:
+			save_presets(self._presets)
+		except Exception:
+			pass
+		self._refresh_presets_popup()
+		self._set_status(f'Saved preset "{name}".')
+
+	def _open_manage_presets_dialog(self):
+		"""Surface a small manage sheet — delete-only for v1.2.0."""
+		if not self._presets:
+			self._set_status('No presets saved yet.')
+			return
+		# Without a full sheet UI, fall back to a quick "delete by name" prompt.
+		try:
+			from vanilla.dialogs import askString
+			name = askString(
+				'Manage Presets',
+				'Type a preset name to delete (cancel to abort):',
+				'',
+			)
+		except Exception:
+			name = None
+		if not name:
+			return
+		name = name.strip()
+		if name in self._presets:
+			del self._presets[name]
+			try:
+				save_presets(self._presets)
+			except Exception:
+				pass
+			self._refresh_presets_popup()
+			self._set_status(f'Deleted preset "{name}".')
+		else:
+			self._set_status(f'No preset named "{name}".', error=True)
+
+	# ------------------------------------------------------------------
+	# Recent folders
+	# ------------------------------------------------------------------
+
+	@objc.python_method
+	def _refresh_recents_popup(self):
+		"""Repopulate the recent folders popup."""
+		home = os.path.expanduser('~')
+		items = [self._RECENT_HEADER_LABEL]
+		for folder in self._recent_folders[:RECENT_FOLDERS_MAX]:
+			# Shorten with ~ for readability.
+			short = folder.replace(home, '~', 1) if folder.startswith(home) else folder
+			items.append(short)
+		try:
+			self.w.recentFoldersPopup.setItems(items)
+			self.w.recentFoldersPopup.set(0)
+		except (AttributeError, RuntimeError):
+			pass
+
+	def _on_recent_folder_chosen(self, sender):
+		"""Apply a recent-folder pick to the folder field."""
+		try:
+			idx = sender.get()
+		except (AttributeError, RuntimeError):
+			return
+		if idx <= 0 or idx > len(self._recent_folders):
+			return
+		folder = self._recent_folders[idx - 1]
+		try:
+			self.w.folderField.set(folder)
+		except (AttributeError, RuntimeError):
+			pass
+		# Bump to front of MRU.
+		self._push_recent_folder(folder)
+		try:
+			sender.set(0)
+		except (AttributeError, RuntimeError):
+			pass
+
+	@objc.python_method
+	def _push_recent_folder(self, folder):
+		"""Move ``folder`` to the front of the MRU and persist."""
+		if not folder:
+			return
+		self._recent_folders = push_recent_folder(self._recent_folders, folder)
+		try:
+			save_recent_folders(self._recent_folders)
+		except Exception:
+			pass
+		self._refresh_recents_popup()
 
 	# ------------------------------------------------------------------
 	# Public
@@ -1760,4 +2417,9 @@ class VFClampDialog:
 
 	def show(self):
 		"""Bring the dialog window to the front."""
+		# Sheet modality would attach via NSWindow.beginSheet_completionHandler_
+		# only when the source GSFont has a visible parent window. Falls back to
+		# a normal panel so headless gsfonts and the file-source path keep
+		# working. v1.2.0 ships the standalone panel; sheet modality is a
+		# follow-up. (See plan §6.)
 		self.w.open()
