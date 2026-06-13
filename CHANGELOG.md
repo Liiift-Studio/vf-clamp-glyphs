@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.3] — 2026-06-13
+
+- **Real source-font preview**: the animated `HOHO Anes` specimen now renders with the user's actual font instead of the macOS system fallback. New module `font_registration.py` wraps `CTFontManagerRegisterFontsForURL` to register the source with the process-scope font namespace and extract its `NSFontDescriptor`, which `AnimatedPreviewView.setFontDescriptor_()` consumes.
+- **File source mode**: synchronous register on `_load_font(path)`. Effectively instant.
+- **Open Font source mode**: spawns a background worker (`export_gsfont_to_temp_vf_async`) that saves a copy of the open `.glyphs` to a temp directory, opens it headlessly via `Glyphs.open(showInterface=False)`, finds-or-creates a Variable Font Setting, calls `vf_inst.generate(format='OTF', containers=[PLAIN])` to compile a temp variable TTF, and registers it. Slow first hit (a few seconds) but only once per source font. Stale-callback token guards against the user changing sources mid-export.
+- **Cleanup**: `_on_cancel` invokes `cleanup_all_temp_paths()` to unregister every temp font + delete every temp directory so registered fonts don't leak across sessions.
+
 ## [1.2.2] — 2026-06-13
 
 - **Fix**: Cancel + Generate buttons no longer clipped by the bottom edge of the dialog. The 36-px action bar was too tight for a 32-px Generate, 24-px Cancel/Reveal, and 18-px shortcut hints — bumped to 56 px with hints anchored to a stable Y offset.

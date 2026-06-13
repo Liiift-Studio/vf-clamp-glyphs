@@ -172,6 +172,12 @@ from presets import (  # noqa: E402
 )
 from hull_plot import make_hull_plot_view, is_available as hull_plot_available  # noqa: E402
 from preview_view import make_preview_view, is_available as preview_view_available  # noqa: E402
+from font_registration import (  # noqa: E402
+	register_font_at_path,
+	export_gsfont_to_temp_vf_async,
+	cleanup_all_temp_paths,
+	is_available as font_registration_available,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1259,6 +1265,12 @@ class VFClampDialog:
 				pv.stopAnimating()
 			except (AttributeError, RuntimeError):
 				pass
+		# Unregister + delete any temp preview fonts so they don't leak
+		# into other AppKit processes' font namespaces.
+		try:
+			cleanup_all_temp_paths()
+		except Exception:  # noqa: BLE001
+			pass
 		try:
 			self.w.close()
 		except (AttributeError, RuntimeError):
@@ -1347,6 +1359,9 @@ class VFClampDialog:
 		self._refresh_preview()
 		self._refresh_generate_button()
 		self._set_status('')
+		# Kick off a background compile so the animated preview eventually
+		# switches from the system font fallback to the user's real glyphs.
+		self._setup_preview_font_for_gsfont_source(gsfont)
 
 	def _on_choose_folder(self, sender):
 		"""Open a panel for the user to select an output folder."""
@@ -1908,6 +1923,10 @@ class VFClampDialog:
 		self._refresh_name()
 		self._refresh_preview()
 		self._refresh_generate_button()
+		# Register the file with CTFontManager so the animated preview
+		# renders with the actual source font's glyphs instead of the
+		# system fallback.
+		self._setup_preview_font_for_file_source(path)
 
 	@objc.python_method
 	def _close_cached_font(self):
@@ -2126,6 +2145,76 @@ class VFClampDialog:
 				view.stopAnimating()
 		except (AttributeError, RuntimeError):
 			pass
+
+	# ------------------------------------------------------------------
+	# Preview font registration — swaps the system fallback for the real
+	# source font so "HOHO Anes" renders with the user's actual glyphs.
+	# ------------------------------------------------------------------
+
+	@objc.python_method
+	def _setup_preview_font_for_file_source(self, path):
+		"""Register a file-source TTF/OTF and push its descriptor to the preview."""
+		view = getattr(self, '_preview_view', None)
+		if view is None or not font_registration_available() or not path:
+			return
+		try:
+			ok, descriptor = register_font_at_path(path)
+			if ok and descriptor is not None:
+				try:
+					view.setFontDescriptor_(descriptor)
+				except (AttributeError, RuntimeError):
+					pass
+		except Exception:  # noqa: BLE001
+			traceback.print_exc()
+
+	@objc.python_method
+	def _setup_preview_font_for_gsfont_source(self, gsfont):
+		"""Kick off a background export + registration for an Open Font source.
+
+		Compiles a temp variable TTF, registers it, and pushes its descriptor
+		to the preview view when ready. Uses a monotonic token so that if the
+		user changes source fonts during the export, the stale callback is
+		ignored instead of overwriting the new font's preview.
+		"""
+		view = getattr(self, '_preview_view', None)
+		if view is None or not font_registration_available() or gsfont is None:
+			return
+
+		# Bump the token — any in-flight export from a previous source is now stale.
+		self._preview_token = getattr(self, '_preview_token', 0) + 1
+		token = self._preview_token
+
+		# Quick visual signal that something is happening; the system font
+		# keeps animating in the meantime.
+		try:
+			view.setNeedsDisplay_(True)
+		except (AttributeError, RuntimeError):
+			pass
+
+		dialog_ref = self
+
+		def _on_complete(temp_path, descriptor):
+			"""Worker-thread callback — marshalled back to the main thread."""
+			def _apply():
+				# Stale callback (user already moved on) — drop on the floor.
+				if getattr(dialog_ref, '_preview_token', 0) != token:
+					return
+				v = getattr(dialog_ref, '_preview_view', None)
+				if v is None or descriptor is None:
+					return
+				try:
+					v.setFontDescriptor_(descriptor)
+				except (AttributeError, RuntimeError):
+					pass
+			try:
+				AppHelper.callAfter(_apply)
+			except (AttributeError, RuntimeError):
+				# Last resort: try in-thread (will probably succeed since
+				# AppKit calls from background threads sometimes work for
+				# simple state mutations).
+				_apply()
+
+		export_gsfont_to_temp_vf_async(gsfont, _on_complete)
 
 	@objc.python_method
 	def _compute_current_hull(self, selected):
