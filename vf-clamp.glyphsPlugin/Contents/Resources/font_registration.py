@@ -247,12 +247,22 @@ def _export_gsfont_to_temp_vf_sync(gsfont) -> Tuple[Optional[str], Optional[obje
 
 	finally:
 		# Close the temp document; never let preview prep crash the dialog.
+		# Run the full NSDocumentController eviction so Glyphs' autosave
+		# subsystem doesn't surface "clone (Autosaved).glyphs doesn't exist"
+		# after the preview compile finishes.
 		if temp_doc is not None:
 			try:
-				if hasattr(temp_doc, 'parent') and temp_doc.parent is not None:
-					temp_doc.parent.close()
-				elif hasattr(temp_doc, 'close'):
-					temp_doc.close()
+				# Defer to gsfont_core's helper when importable; otherwise
+				# fall back to a local minimal close. The helper does the
+				# updateChangeCount_ + removeDocument_ + close sequence.
+				try:
+					from gsfont_core import _evict_clone_tracking  # type: ignore
+					_evict_clone_tracking(temp_doc)
+				except Exception:  # noqa: BLE001
+					if hasattr(temp_doc, 'parent') and temp_doc.parent is not None:
+						temp_doc.parent.close()
+					elif hasattr(temp_doc, 'close'):
+						temp_doc.close()
 			except Exception:  # noqa: BLE001
 				pass
 

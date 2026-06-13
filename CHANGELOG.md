@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.8] — 2026-06-13
+
+- **Fix: "The file 'clone (Autosaved).glyphs' doesn't exist." alert after every save**. `gsfont.copy()` (the first step of `clamp_gsfont`) silently registers the clone with Glyphs' shared `NSDocumentController` and gives it an autosave path that is never actually written. When the cloned GSFont was later garbage-collected, Glyphs' autosave subsystem looked for that phantom file and surfaced a modal alert. New helper `_evict_clone_tracking(gsfont)` in `gsfont_core.py` calls `parent.updateChangeCount_(0)` → `NSDocumentController.removeDocument_(parent)` → `parent.close()` to make Glyphs forget the clone before the autosave check fires. Wired into `save_gsfont_to_glyphs`, `export_gsfont_binary_via_glyphs`, and the preview-compile temp-doc cleanup in `font_registration.py`.
+
 ## [1.2.7] — 2026-06-13
 
 - **Fix bottom-up Y inversion for raw NSView placement**. The hull-plot and HOHO-Anes preview views are mounted directly on `win._window.contentView().addSubview_()` — which uses macOS-default bottom-left coordinates — but everywhere else in the dialog we use vanilla's top-left convention. The two NSViews were therefore rendering at flipped Y positions. Symptoms: in v1.2.6's taller window, the hull plot rectangle drifted down into Zone 3 (overlapping Format/Folder), and "HOHO Anes" floated up into the preview-name slot. Fix: convert top-y → bottom-y (`window_h − top_y − view_h`) before constructing each raw NSView's frame.

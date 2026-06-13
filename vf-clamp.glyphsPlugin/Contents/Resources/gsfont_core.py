@@ -273,12 +273,61 @@ def save_gsfont_to_glyphs(gsfont: Any, output_path: str, format_version: Optiona
 	``formatVersion`` (so a Glyphs 2 source produces a Glyphs 2 file rather than
 	being silently upgraded to Glyphs 3 schema). Callers can pass an explicit
 	integer to override.
+
+	After the file is written we explicitly evict the cloned GSFont's tracked
+	NSDocument from Glyphs' document controller. Reason: ``gsfont.copy()``
+	(called upstream by ``clamp_gsfont``) silently registers the clone with
+	NSDocumentController, naming it "clone" with an autosave path that was
+	never actually written. When that document is later garbage-collected,
+	Glyphs' autosave subsystem surfaces a modal alert:
+
+	    The file "clone (Autosaved).glyphs" doesn't exist.
+
+	Marking the doc as clean + removing it from the controller + closing it
+	makes Glyphs forget the clone before the autosave check fires.
 	"""
 	if format_version is None:
 		# Inherit the source font's format version; default to 3 if unknown.
 		format_version = getattr(gsfont, 'formatVersion', None) or 3
 	# makeCopy=True writes a new file without changing the font's tracked file path.
 	gsfont.save(path=output_path, formatVersion=format_version, makeCopy=True)
+	_evict_clone_tracking(gsfont)
+
+
+def _evict_clone_tracking(gsfont: Any) -> None:
+	"""Detach the cloned GSFont from Glyphs' NSDocumentController + autosave.
+
+	Best-effort: each step is guarded so partial AppKit availability across
+	Glyphs versions doesn't crash the save flow. Safe to call when there's
+	no parent doc (no-op).
+	"""
+	if not _GLYPHS_AVAILABLE:
+		return
+	try:
+		parent = getattr(gsfont, 'parent', None)
+	except Exception:  # noqa: BLE001
+		parent = None
+	if parent is None:
+		return
+	# 1. Clear the dirty flag so autosave doesn't try to write a new copy on
+	#    teardown. NSChangeCleared == 0.
+	try:
+		parent.updateChangeCount_(0)
+	except (AttributeError, RuntimeError):
+		pass
+	# 2. Remove from the shared document controller's tracked-document set.
+	try:
+		from AppKit import NSDocumentController  # type: ignore
+		dc = NSDocumentController.sharedDocumentController()
+		if dc is not None:
+			dc.removeDocument_(parent)
+	except (ImportError, AttributeError, RuntimeError):
+		pass
+	# 3. Close without prompting.
+	try:
+		parent.close()
+	except (AttributeError, RuntimeError):
+		pass
 
 
 def _container_for_format(fmt: str) -> Any:
@@ -414,15 +463,15 @@ def export_gsfont_binary_via_glyphs(clamped_font: Any, output_path: str, fmt: st
 		# for compatibility with the older Python bundled in some Glyphs builds.
 		shutil.move(str(generated[0]), str(output_path_obj))
 	finally:
-		# Close the temp document without prompting to save.
+		# Close the temp document without prompting to save. Use the same
+		# eviction sequence as save_gsfont_to_glyphs so the binary export
+		# path doesn't trip the "clone (Autosaved).glyphs doesn't exist"
+		# alert when temp_doc is GC'd later.
 		if temp_doc is not None:
-			try:
-				if hasattr(temp_doc, 'parent') and temp_doc.parent is not None:
-					temp_doc.parent.close()
-				elif hasattr(temp_doc, 'close'):
-					temp_doc.close()
-			except (AttributeError, RuntimeError):
-				pass
+			_evict_clone_tracking(temp_doc)
+		# Also evict the upstream clamped_font's tracking — clamp_gsfont
+		# returns a copy() that registered itself with NSDocumentController.
+		_evict_clone_tracking(clamped_font)
 		# Best-effort cleanup of the temp directory. ignore_errors=True already
 		# swallows OSError; no need for a second except wrapper.
 		shutil.rmtree(tmp_dir, ignore_errors=True)
