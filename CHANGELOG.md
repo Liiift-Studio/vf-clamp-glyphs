@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.7] — 2026-06-13
+
+- **Fix bottom-up Y inversion for raw NSView placement**. The hull-plot and HOHO-Anes preview views are mounted directly on `win._window.contentView().addSubview_()` — which uses macOS-default bottom-left coordinates — but everywhere else in the dialog we use vanilla's top-left convention. The two NSViews were therefore rendering at flipped Y positions. Symptoms: in v1.2.6's taller window, the hull plot rectangle drifted down into Zone 3 (overlapping Format/Folder), and "HOHO Anes" floated up into the preview-name slot. Fix: convert top-y → bottom-y (`window_h − top_y − view_h`) before constructing each raw NSView's frame.
+- **Shrink HOHO Anes from 64 pt to 44 pt** so the specimen fits comfortably inside the ~370 px right column even when the wght/wdth sweep makes the text temporarily wider on heavy axis values.
+
 ## [1.2.6] — 2026-06-13
 
 - **"Open after generating" checkbox** in the Output zone. When ticked, successful saves trigger `Glyphs.open(path)` for `.glyphs` outputs and `NSWorkspace.openFile_` for binary outputs.

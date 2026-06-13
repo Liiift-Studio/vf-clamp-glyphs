@@ -757,13 +757,16 @@ class VFClampDialog:
 			pass
 
 		# Hull plot — custom NSView when available, else a chips text box.
-		# The plot view uses window-relative coords; do NOT addSubview_ on the
-		# Box (its re-parenting is unreliable across Glyphs builds). Mount on
-		# the window's content view instead.
+		# CRITICAL: addSubview_ on an unflipped NSView uses bottom-left origin
+		# (macOS default), but our Y values throughout this dialog are top-
+		# left. Convert top-y → bottom-y before constructing the frame.
+		# Vanilla widgets auto-flip; raw NSView addSubview_ does not.
 		plot_y_box = 60
 		plot_h = 140
 		plot_y = Y(plot_y_box)
-		view = make_hull_plot_view((right_x, plot_y, col_w, plot_h))
+		window_h = self._compute_window_height()
+		plot_y_flipped = window_h - plot_y - plot_h
+		view = make_hull_plot_view((right_x, plot_y_flipped, col_w, plot_h))
 		if view is not None:
 			try:
 				win._window.contentView().addSubview_(view)
@@ -799,18 +802,24 @@ class VFClampDialog:
 			pass
 
 		# --- Animated VF specimen preview ("HOHO Anes") -----------------
-		# Mounted on the window's content view (not the Box's NSView — see
-		# _build_zone_source for the rationale) so the frame is in window
-		# coords. Starts animating once a hull is computed.
+		# Same top→bottom Y conversion as the hull plot above.
 		preview_top_y = plot_y + plot_h + 32   # 32 px below the size-estimate label
 		preview_h = ZONE_H - (preview_top_y - y) - 10
+		preview_y_flipped = window_h - preview_top_y - preview_h
 		self._preview_view = None
 		if preview_view_available() and preview_h >= 60:
-			pv = make_preview_view((right_x, preview_top_y, col_w, preview_h))
+			pv = make_preview_view((right_x, preview_y_flipped, col_w, preview_h))
 			if pv is not None:
 				try:
 					win._window.contentView().addSubview_(pv)
 					self._preview_view = pv
+					# Constrain HOHO Anes to fit the column width — 64 pt at
+					# the dialog's ~370-px right column overflows on bold
+					# axis values. Drop to 44 pt for a comfortable fit.
+					try:
+						pv.setFontSize_(44.0)
+					except (AttributeError, RuntimeError):
+						pass
 				except (AttributeError, RuntimeError):
 					self._preview_view = None
 
