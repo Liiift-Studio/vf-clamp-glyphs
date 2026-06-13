@@ -380,7 +380,9 @@ class VFClampDialog:
 	# Zone heights are fixed so the action bar always sits at the same Y.
 	ZONE1_H = 96
 	ZONE2_H = 348
-	ZONE3_H = 144
+	ZONE3_H = 174  # bumped to fit the new "Open after generating" checkbox row
+	# Scrollable error/status log between zone 3 and the action bar.
+	LOG_H = 84
 	# Dashboard internals
 	COL_GAP = 16
 	# Bottom action bar button widths — Generate is larger and primary blue.
@@ -445,6 +447,9 @@ class VFClampDialog:
 		self._cancelled = False
 		# Output measurements — when known, drive the size-estimate line.
 		self._source_size_bytes: Optional[int] = None
+		# v1.2.6: "Open output after generating" checkbox state — defaulted to
+		# False so existing automation isn't surprised by a sudden tab open.
+		self._open_after_save = False
 
 		# Persistent state — presets + recents. Failures fall back to empty.
 		try:
@@ -534,6 +539,7 @@ class VFClampDialog:
 		y = self._build_zone_source(y)
 		y = self._build_zone_dashboard(y)
 		y = self._build_zone_output(y)
+		y = self._build_log_pane(y)
 		y = self._build_action_bar(y)
 		self._static_sections_height = y
 
@@ -918,8 +924,68 @@ class VFClampDialog:
 				widget._nsObject.setAccessibilityLabel_(ax_label)
 			except (AttributeError, RuntimeError):
 				pass
+		row_y += 30
+
+		# --- "Open after generating" checkbox ------------------------
+		win.openAfterSave = vanilla.CheckBox(
+			(CTRL_X, Y(row_y), -R_INSET, 22),
+			'Open output in Glyphs (or default app) after generating',
+			value=getattr(self, '_open_after_save', False),
+			callback=self._on_open_after_save_changed,
+		)
+		try:
+			win.openAfterSave._nsObject.setAccessibilityLabel_(
+				'Open the saved file after generating'
+			)
+		except (AttributeError, RuntimeError):
+			pass
 
 		return y + ZONE_H + PAD
+
+	def _build_log_pane(self, y):
+		"""Scrollable read-only log pane for errors + status messages.
+
+		Sits between zone 3 and the action bar so error output has room to
+		breathe instead of being squeezed into a 74-px sliver next to the
+		Generate button. Multi-line, selectable, monospaced so tracebacks
+		stay readable.
+		"""
+		win = self.w
+		PAD = self.PAD
+		LOG_H = self.LOG_H
+		win.logHeader = self._semibold_label(
+			(PAD + 12, y, 200, 16), 'LOG',
+		)
+		# vanilla.TextEditor wraps NSTextView in an NSScrollView with native
+		# vertical scrolling for free.
+		win.logEditor = vanilla.TextEditor(
+			(PAD, y + 18, -PAD, LOG_H - 18),
+			text='',
+			readOnly=True,
+			callback=None,
+		)
+		try:
+			ed = win.logEditor._nsObject  # NSScrollView
+			tv = ed.documentView() if hasattr(ed, 'documentView') else None
+			if tv is not None:
+				tv.setFont_(NSFont.userFixedPitchFontOfSize_(11.0))
+				tv.setEditable_(False)
+				tv.setSelectable_(True)
+				tv.setBackgroundColor_(
+					NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.18),
+				)
+				tv.setTextColor_(NSColor.labelColor())
+		except (AttributeError, RuntimeError):
+			pass
+		try:
+			win.logEditor._nsObject.setAccessibilityLabel_(
+				'Log of recent status messages and errors',
+			)
+		except (AttributeError, RuntimeError):
+			pass
+		# Hint text on first launch so the empty pane doesn't look broken.
+		self._log_append('Ready. Pick instances and click Generate.')
+		return y + LOG_H + PAD
 
 	def _build_action_bar(self, y):
 		"""Bottom row — shortcut hints, spinner+status, Reveal/Cancel/Generate."""
@@ -1041,12 +1107,13 @@ class VFClampDialog:
 	def _compute_window_height(self):
 		"""Return the total window height. v1.2.0 fixes the layout — no instance-count math."""
 		PAD = self.PAD
-		# PAD + zone1 + PAD + zone2 + PAD + zone3 + PAD + action_bar + PAD
+		# PAD + zone1 + PAD + zone2 + PAD + zone3 + PAD + log + PAD + action_bar + PAD
 		return (
 			PAD
 			+ self.ZONE1_H + PAD
 			+ self.ZONE2_H + PAD
 			+ self.ZONE3_H + PAD
+			+ self.LOG_H + PAD
 			+ self.ACTION_BAR_H + PAD
 		)
 
@@ -1844,6 +1911,9 @@ class VFClampDialog:
 			self.w.spinner.stop()
 		except Exception:
 			pass
+		# Honour the "Open after generating" checkbox.
+		if getattr(self, '_open_after_save', False):
+			self._open_path_after_save(path)
 
 	@objc.python_method
 	def _on_generate_failure(self, message):
@@ -2415,9 +2485,89 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _set_status(self, message, error=False):
-		"""Update the status label. Errors are prefixed with 'Error:'."""
+		"""Update the status label AND append the message to the log pane.
+
+		The narrow status label is kept for the case where the user has
+		auto-hidden the log; the log pane is the authoritative surface for
+		anything longer than ~80 characters.
+		"""
 		text = f'Error: {message}' if error else message
-		self.w.statusLabel.set(text)
+		try:
+			self.w.statusLabel.set(text)
+		except (AttributeError, RuntimeError):
+			pass
+		# Don't double-log blanks (e.g. status-clears during normal flow).
+		if message:
+			self._log_append(text)
+
+	@objc.python_method
+	def _log_append(self, message):
+		"""Append a line to the scrollable log pane and scroll to the bottom.
+
+		Truncates the log when it exceeds ~5 KB so the pane never grows
+		without bound across a long debugging session.
+		"""
+		if not message:
+			return
+		editor = getattr(self.w, 'logEditor', None)
+		if editor is None:
+			return
+		try:
+			existing = editor.get() or ''
+			if existing and not existing.endswith('\n'):
+				existing += '\n'
+			combined = (existing + str(message)).rstrip() + '\n'
+			# Keep only the trailing ~5 KB so the editor stays snappy.
+			if len(combined) > 5120:
+				combined = combined[-5120:]
+				combined = combined[combined.find('\n') + 1:] if '\n' in combined else combined
+			editor.set(combined)
+			# Scroll to the bottom via the underlying NSTextView.
+			try:
+				tv = editor._nsObject.documentView()
+				if tv is not None and hasattr(tv, 'scrollRangeToVisible_'):
+					from Foundation import NSMakeRange  # type: ignore
+					length = len(combined)
+					tv.scrollRangeToVisible_(NSMakeRange(length, 0))
+			except (AttributeError, RuntimeError, ImportError):
+				pass
+		except (AttributeError, RuntimeError):
+			pass
+
+	def _on_open_after_save_changed(self, sender):
+		"""Persist the checkbox state so it survives within the dialog session."""
+		try:
+			self._open_after_save = bool(sender.get())
+		except (AttributeError, RuntimeError):
+			self._open_after_save = False
+
+	@objc.python_method
+	def _open_path_after_save(self, path):
+		"""Open the saved output in Glyphs (for .glyphs) or the default app."""
+		if not path or not os.path.exists(path):
+			return
+		try:
+			ext = os.path.splitext(path)[1].lower()
+			if ext in ('.glyphs', '.glyphspackage'):
+				# Open in Glyphs as a real document tab.
+				try:
+					from GlyphsApp import Glyphs  # type: ignore
+					Glyphs.open(path)
+					self._log_append(f'Opened in Glyphs: {path}')
+					return
+				except (ImportError, AttributeError, RuntimeError):
+					pass
+			# Fallback: macOS default opener (open command via LaunchServices).
+			try:
+				from AppKit import NSWorkspace  # type: ignore
+				NSWorkspace.sharedWorkspace().openFile_(path)
+				self._log_append(f'Opened: {path}')
+			except (ImportError, AttributeError, RuntimeError):
+				import subprocess
+				subprocess.Popen(['/usr/bin/open', path])
+				self._log_append(f'Opened via /usr/bin/open: {path}')
+		except Exception as e:  # noqa: BLE001
+			self._log_append(f'Could not open {path}: {e}')
 
 	# ------------------------------------------------------------------
 	# Presets

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.6] — 2026-06-13
+
+- **"Open after generating" checkbox** in the Output zone. When ticked, successful saves trigger `Glyphs.open(path)` for `.glyphs` outputs and `NSWorkspace.openFile_` for binary outputs.
+- **Dedicated scrollable LOG pane** between the Output zone and the action bar. Replaces the previously-truncated 74-px status sliver. NSTextView wrapped in an NSScrollView, monospaced, semi-transparent dark background. All status updates flow through `_log_append()` which auto-scrolls to the bottom and trims to ~5 KB so a long session doesn't bloat the editor.
+- Status label retained for the brief one-line summary in the action bar; the log is now the authoritative surface for anything longer.
+- Action area shape: Zone 3 height bumped 144 → 174 to fit the new checkbox row; new constant `LOG_H = 84` reserves the log pane; total window height grows by ~94 px.
+
 ## [1.2.5] — 2026-06-13
 
 - **Real fix for invisible wght animation**: `CTFontManagerCreateFontDescriptorsFromURL` returns one descriptor per font face in the file — for a variable font with named instances, that's the variable font itself **plus** one descriptor per named instance with axes already collapsed. v1.2.3 / v1.2.4 took `descriptors[0]` blindly, which often landed on an instance descriptor with no variable axes left to animate. v1.2.5 walks every descriptor, probes each with `CTFontCreateWithFontDescriptor`, queries `CTFontCopyVariationAxes`, and returns the first one that exposes a non-empty axis list (falls back to `descriptors[0]` for legitimately static fonts).
