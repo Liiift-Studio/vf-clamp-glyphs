@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.2.4] — 2026-06-13
+
+- **Fix: axis animation now visible for source fonts with non-standard axis identifiers**. v1.2.3 computed identifiers from OpenType tags (`'wght' → 0x77676874`) but the compiled font may report different identifiers in its `fvar` table. Now `setFontDescriptor_` queries the real axes via `CTFontCopyVariationAxes` and builds a `tag → identifier` map so `NSFontVariationAttribute` receives the keys the font actually understands. Falls back to the computed identifier when the CoreText query fails.
+- **Hide the specimen at 10% opacity when no instances are selected**. Previously "HOHO Anes" stayed at full opacity with stale variation values even when the hull was empty — visually loud but conveying nothing. Now the no-selection state dims to 10% with a hint caption.
+
 ## [1.2.3] — 2026-06-13
 
 - **Real source-font preview**: the animated `HOHO Anes` specimen now renders with the user's actual font instead of the macOS system fallback. New module `font_registration.py` wraps `CTFontManagerRegisterFontsForURL` to register the source with the process-scope font namespace and extract its `NSFontDescriptor`, which `AnimatedPreviewView.setFontDescriptor_()` consumes.

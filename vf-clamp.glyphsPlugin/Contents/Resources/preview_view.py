@@ -36,9 +36,23 @@ try:
 		NSTimer,
 	)
 	from Foundation import NSMakeRect, NSMakePoint, NSMakeSize  # type: ignore
+	try:
+		from CoreText import (  # type: ignore
+			CTFontCopyVariationAxes,
+			CTFontCreateWithFontDescriptor,
+			kCTFontVariationAxisIdentifierKey,
+			kCTFontVariationAxisNameKey,
+			kCTFontVariationAxisMinimumValueKey,
+			kCTFontVariationAxisDefaultValueKey,
+			kCTFontVariationAxisMaximumValueKey,
+		)
+		_CT_AXIS_API = True
+	except Exception:  # noqa: BLE001
+		_CT_AXIS_API = False
 	_APPKIT_AVAILABLE = True
 except Exception:  # noqa: BLE001 — AppKit missing on CI
 	_APPKIT_AVAILABLE = False
+	_CT_AXIS_API = False
 
 
 SPECIMEN_TEXT = 'HOHO Anes'
@@ -66,6 +80,30 @@ def _axis_tag_to_int(tag: str) -> int:
 	return (ord(pad[0]) << 24) | (ord(pad[1]) << 16) | (ord(pad[2]) << 8) | ord(pad[3])
 
 
+def _int_to_axis_tag(identifier: int) -> str:
+	"""Unpack a 32-bit identifier back into a 4-character axis tag.
+
+	Used to match CTFontCopyVariationAxes results to OpenType tag names
+	from the hull dict.
+	"""
+	if not identifier:
+		return ''
+	try:
+		chars = [
+			chr((identifier >> 24) & 0xFF),
+			chr((identifier >> 16) & 0xFF),
+			chr((identifier >> 8) & 0xFF),
+			chr(identifier & 0xFF),
+		]
+		tag = ''.join(chars).rstrip()
+		# Sanity check: real tags are printable ASCII.
+		if tag and all(0x20 < ord(c) < 0x7F for c in tag):
+			return tag
+		return ''
+	except (ValueError, TypeError):
+		return ''
+
+
 if _APPKIT_AVAILABLE:
 
 	class AnimatedPreviewView(NSView):
@@ -88,24 +126,58 @@ if _APPKIT_AVAILABLE:
 			self._timer = None
 			self._base_descriptor = None
 			self._anim_progress = 0.0
+			# Map of OpenType axis tag (lowercase, e.g. 'wght') to the
+			# integer identifier the *registered* font reports. Built from
+			# CTFontCopyVariationAxes when setFontDescriptor_ is called.
+			# Falls back to a computed tag-as-int when CoreText can't give
+			# us the axes, which works for most fonts but not all.
+			self._axis_id_by_tag = {}  # type: Dict[str, int]
 			return self
 
 		# --------- public PyObjC entry points (Python-callable) ----------
 
 		def setHull_(self, hull):
-			"""hull: dict[axis_tag, (lo, hi)] — pinned axes contribute lo==hi."""
+			"""hull: dict[axis_tag, (lo, hi)] — pinned axes contribute lo==hi.
+
+			Forces a redraw so the no-selection 10% opacity state lands
+			immediately instead of waiting for the next animation frame.
+			"""
 			self._hull = dict(hull) if hull else {}
 			self.setNeedsDisplay_(True)
 
 		def setFontDescriptor_(self, descriptor):
-			"""Optional override of the underlying font descriptor.
+			"""Override the underlying font descriptor.
 
 			When None (the default), the view falls back to the system
 			variable font for animation. When the caller registers a real
 			variable font via CTFontManagerRegisterFontsForURL_, pass the
 			descriptor from that font here.
+
+			Also queries the font's actual axes via CTFontCopyVariationAxes
+			so we use the font's reported axis identifiers instead of
+			computing them from OpenType tags — necessary when the compiled
+			font assigns non-standard identifiers to its axes.
 			"""
 			self._base_descriptor = descriptor
+			self._axis_id_by_tag = {}
+			if descriptor is not None and _CT_AXIS_API:
+				try:
+					font = CTFontCreateWithFontDescriptor(descriptor, self._font_size, None)
+					if font is not None:
+						axes = CTFontCopyVariationAxes(font)
+						if axes:
+							for axis in axes:
+								try:
+									identifier = axis.get(kCTFontVariationAxisIdentifierKey)
+									if identifier is None:
+										continue
+									tag = _int_to_axis_tag(int(identifier))
+									if tag:
+										self._axis_id_by_tag[tag] = int(identifier)
+								except (AttributeError, TypeError, ValueError):
+									continue
+				except (AttributeError, RuntimeError, TypeError):
+					self._axis_id_by_tag = {}
 			self.setNeedsDisplay_(True)
 
 		def setFontSize_(self, size):
@@ -168,8 +240,15 @@ if _APPKIT_AVAILABLE:
 			if font is None:
 				return
 
+			# No-selection state: render the specimen at 10% opacity so the
+			# preview area doesn't draw the eye when there's nothing to
+			# show. The caption flips to a hint.
+			specimen_alpha = 1.0
+			if not self._hull:
+				specimen_alpha = 0.10
+
 			# Build the attributed specimen string, centred in the view.
-			fg = NSColor.labelColor()
+			fg = NSColor.labelColor().colorWithAlphaComponent_(specimen_alpha)
 			para = NSMutableParagraphStyle.alloc().init()
 			para.setAlignment_(NSTextAlignmentCenter)
 			attrs = {
@@ -187,13 +266,16 @@ if _APPKIT_AVAILABLE:
 			origin_y = (bounds.size.height - text_size.height) / 2.0
 			specimen.drawAtPoint_(NSMakePoint(origin_x, origin_y))
 
-			# Caption row beneath: show the live variation values so the
-			# user can see what's being animated.
+			# Caption row beneath: live variation values when animating;
+			# hint text when no selection.
 			caption = self._caption_text(variations)
 			caption_font = NSFont.systemFontOfSize_(NSFont.smallSystemFontSize())
+			caption_color = NSColor.tertiaryLabelColor()
+			if not self._hull:
+				caption_color = NSColor.tertiaryLabelColor().colorWithAlphaComponent_(0.55)
 			caption_attrs = {
 				NSFontAttributeName: caption_font,
-				NSForegroundColorAttributeName: NSColor.tertiaryLabelColor(),
+				NSForegroundColorAttributeName: caption_color,
 				NSParagraphStyleAttributeName: para,
 			}
 			caption_str = NSAttributedString.alloc().initWithString_attributes_(
@@ -239,6 +321,10 @@ if _APPKIT_AVAILABLE:
 
 			Returns None if neither a custom descriptor nor a system
 			variable font can be resolved.
+
+			Axis identifiers come from CTFontCopyVariationAxes on the
+			registered font when available; falls back to computing the
+			tag-as-int when the CoreText axis query failed.
 			"""
 			try:
 				size = self._font_size
@@ -250,11 +336,14 @@ if _APPKIT_AVAILABLE:
 					base = NSFont.systemFontOfSize_(size).fontDescriptor()
 
 				if variations:
-					axis_dict = {
-						_axis_tag_to_int(tag): value
-						for tag, value in variations.items()
-						if _axis_tag_to_int(tag) != 0
-					}
+					axis_dict = {}
+					for tag, value in variations.items():
+						# Prefer the identifier the font actually reported.
+						identifier = self._axis_id_by_tag.get(tag)
+						if identifier is None:
+							identifier = _axis_tag_to_int(tag)
+						if identifier:
+							axis_dict[identifier] = value
 					if axis_dict:
 						base = base.fontDescriptorByAddingAttributes_({
 							NSFontVariationAttribute: axis_dict,
