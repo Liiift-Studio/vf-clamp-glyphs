@@ -171,6 +171,7 @@ from presets import (  # noqa: E402
 	RECENT_FOLDERS_MAX,
 )
 from hull_plot import make_hull_plot_view, is_available as hull_plot_available  # noqa: E402
+from preview_view import make_preview_view, is_available as preview_view_available  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +786,22 @@ class VFClampDialog:
 		except Exception:
 			pass
 
+		# --- Animated VF specimen preview ("HOHO Anes") -----------------
+		# Mounted on the window's content view (not the Box's NSView — see
+		# _build_zone_source for the rationale) so the frame is in window
+		# coords. Starts animating once a hull is computed.
+		preview_top_y = plot_y + plot_h + 32   # 32 px below the size-estimate label
+		preview_h = ZONE_H - (preview_top_y - y) - 10
+		self._preview_view = None
+		if preview_view_available() and preview_h >= 60:
+			pv = make_preview_view((right_x, preview_top_y, col_w, preview_h))
+			if pv is not None:
+				try:
+					win._window.contentView().addSubview_(pv)
+					self._preview_view = pv
+				except (AttributeError, RuntimeError):
+					self._preview_view = None
+
 		return y + ZONE_H + PAD
 
 	def _build_zone_output(self, y):
@@ -903,9 +920,11 @@ class VFClampDialog:
 		win = self.w
 		PAD = self.PAD
 
-		# Shortcut hints on the left
+		# Shortcut hints on the left, vertically aligned with the buttons.
+		# Action bar interior: buttons sit at y+12 with the Generate button
+		# vertically centred against the 32-px footprint.
 		win.shortcutHints = vanilla.TextBox(
-			(PAD, y + 10, 380, 18),
+			(PAD, y + 18, 380, 18),
 			'⌘A All   ⌘D None   ⌘I Invert   ⏎ Generate',
 			sizeStyle='small',
 			selectable=False,
@@ -917,7 +936,7 @@ class VFClampDialog:
 			pass
 
 		# Spinner + status
-		win.spinner = vanilla.ProgressSpinner((PAD + 380, y + 12, 16, 16), displayWhenStopped=False)
+		win.spinner = vanilla.ProgressSpinner((PAD + 380, y + 20, 16, 16), displayWhenStopped=False)
 		try:
 			win.spinner.stop()
 		except Exception:
@@ -931,9 +950,10 @@ class VFClampDialog:
 		gap = self.ACTION_GAP
 
 		# Generate — large + primary blue via the system key-equivalent.
-		# Use a vertical offset so the larger button is centred against the
-		# smaller Reveal/Cancel buttons at the same baseline.
-		gen_y = y + (24 - gen_h) // 2 + 4
+		# Vertically centred against the Cancel/Reveal baseline (which sits at
+		# y+12 with 24-px height) so the 32-px Generate is at y+8 and shares
+		# the same visual centre line.
+		gen_y = y + 8
 		win.generateButton = vanilla.Button(
 			(-PAD - gen_w, gen_y, gen_w, gen_h),
 			'Generate',
@@ -952,7 +972,7 @@ class VFClampDialog:
 			pass
 
 		win.cancelButton = vanilla.Button(
-			(-PAD - gen_w - gap - can_w, y + 10, can_w, 24),
+			(-PAD - gen_w - gap - can_w, y + 12, can_w, 24),
 			'Cancel',
 			callback=self._on_cancel,
 		)
@@ -968,7 +988,7 @@ class VFClampDialog:
 			pass
 
 		win.revealButton = vanilla.Button(
-			(-PAD - gen_w - gap - can_w - gap - rev_w, y + 10, rev_w, 24),
+			(-PAD - gen_w - gap - can_w - gap - rev_w, y + 12, rev_w, 24),
 			'Reveal',
 			callback=self._on_reveal,
 			sizeStyle='small',
@@ -1002,16 +1022,24 @@ class VFClampDialog:
 
 		return y + 36 + PAD
 
+	# Reserved height of the bottom action bar. Must fit:
+	# - the 32-px-tall primary Generate button
+	# - the 24-px-tall Cancel + Reveal buttons (positioned at y + 10)
+	# - the shortcut-hints text below (positioned at y + 38ish)
+	# 56 gives a comfortable bottom margin; 36 was the cause of the clipped
+	# Cancel/Generate buttons reported in v1.2.1.
+	ACTION_BAR_H = 56
+
 	def _compute_window_height(self):
 		"""Return the total window height. v1.2.0 fixes the layout — no instance-count math."""
 		PAD = self.PAD
-		# PAD + zone1 + PAD + zone2 + PAD + zone3 + PAD + action_bar (36) + PAD
+		# PAD + zone1 + PAD + zone2 + PAD + zone3 + PAD + action_bar + PAD
 		return (
 			PAD
 			+ self.ZONE1_H + PAD
 			+ self.ZONE2_H + PAD
 			+ self.ZONE3_H + PAD
-			+ 36 + PAD
+			+ self.ACTION_BAR_H + PAD
 		)
 
 	# ------------------------------------------------------------------
@@ -1224,6 +1252,13 @@ class VFClampDialog:
 		"""Signal cancellation to any in-flight worker, then close the dialog."""
 		self._cancelled = True
 		self._remove_shortcut_monitor()
+		# Stop the animated preview timer so it doesn't keep a dead-view ref.
+		pv = getattr(self, '_preview_view', None)
+		if pv is not None:
+			try:
+				pv.stopAnimating()
+			except (AttributeError, RuntimeError):
+				pass
 		try:
 			self.w.close()
 		except (AttributeError, RuntimeError):
@@ -2074,6 +2109,23 @@ class VFClampDialog:
 		hull = self._compute_current_hull(selected)
 		self._render_hull(hull)
 		self._refresh_size_estimate(selected)
+		self._refresh_animated_preview(hull)
+
+	@objc.python_method
+	def _refresh_animated_preview(self, hull):
+		"""Drive the HOHO Anes specimen view: feed it the hull + animate."""
+		view = getattr(self, '_preview_view', None)
+		if view is None:
+			return
+		try:
+			if hull:
+				view.setHull_(hull)
+				view.startAnimating()
+			else:
+				view.setHull_({})
+				view.stopAnimating()
+		except (AttributeError, RuntimeError):
+			pass
 
 	@objc.python_method
 	def _compute_current_hull(self, selected):

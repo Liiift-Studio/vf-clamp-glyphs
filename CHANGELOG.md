@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.2] — 2026-06-13
+
+- **Fix**: Cancel + Generate buttons no longer clipped by the bottom edge of the dialog. The 36-px action bar was too tight for a 32-px Generate, 24-px Cancel/Reveal, and 18-px shortcut hints — bumped to 56 px with hints anchored to a stable Y offset.
+- **New**: Animated `HOHO Anes` specimen preview in the dashboard zone. Renders the specimen text and cycles `font-variation-settings` over the **selected hull range** (not the full source axis range) so what you see matches what a licensed customer would see in the clamped output. Each axis sweeps lo → hi → lo over a 2.4-second cosine loop, phase-offset per axis so multi-axis fonts don't move in lockstep. Live caption beneath the specimen shows the current axis values.
+- v1.2.2 uses the system variable font for animation (proves the pipeline + axis math). v1.2.3 will register the actual source font via `CTFontManagerRegisterFontsForURL` so the preview shows real glyph shapes from the user's font.
+
 ## [1.2.1] — 2026-06-13
 
 - **Fix critical layout bug in v1.2.0**: zone-build methods used box-relative coordinates while widgets were attached to the window root, causing every widget in zones 1/2/3 to render stacked at the top-left of the window with massive overlap. Cause: `vanilla.Box` re-parenting via `box.attr = win.widget` is unreliable across Glyphs builds; widgets stay attached to whatever container they were originally assigned to. Fix: keep the Boxes as decorative frames only, place every child widget at window-relative coordinates (add `PAD` to X, add `y` to Y), drop the broken `box.title = win.title` re-assignments, and mount the hull plot NSView on `win._window.contentView()` instead of `box._nsObject`.
