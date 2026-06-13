@@ -1088,20 +1088,9 @@ class VFClampDialog:
 			except (AttributeError, RuntimeError):
 				pass
 
-		# Status label spans the full bottom row below the buttons + hints
-		# so long error messages aren't truncated to ~74 px. Multi-line and
-		# selectable so the user can copy a full traceback if needed; the
-		# accompanying tooltip carries the full untruncated message too.
-		win.statusLabel = vanilla.TextBox(
-			(PAD, y + 38, -PAD, 14),
-			'',
-			sizeStyle='small',
-			selectable=True,
-		)
-		try:
-			win.statusLabel._nsObject.setAccessibilityLabel_('Status')
-		except (AttributeError, RuntimeError):
-			pass
+		# v1.2.9: the redundant status label was removed — the LOG pane above
+		# the action bar already shows everything that used to appear here.
+		# `_set_status` now writes only to the log.
 
 		return y + 36 + PAD
 
@@ -1474,13 +1463,9 @@ class VFClampDialog:
 		if err and current.strip():
 			self._set_status(err, error=True)
 		else:
-			# Avoid clobbering unrelated status messages — only clear if the
-			# current message looks like a validation error.
-			try:
-				if str(self.w.statusLabel.get()).startswith('Error:'):
-					self._set_status('')
-			except Exception:
-				pass
+			# v1.2.9: status label removed; the log pane keeps the full
+			# history so there's nothing to selectively clear here.
+			pass
 		# Mirror live into the preview text.
 		self._refresh_preview()
 
@@ -1614,6 +1599,34 @@ class VFClampDialog:
 			if checked:
 				out.append(name)
 		return out
+
+	@objc.python_method
+	def _selected_instance_indices(self) -> List[int]:
+		"""Return full-list indices of every currently-checked instance."""
+		return [i for i, v in enumerate(self._instance_checked) if v]
+
+	@objc.python_method
+	def _toggle_instance_at_index(self, idx: int) -> None:
+		"""Flip the checked state at ``idx`` and refresh dependent UI.
+
+		Used as the click callback from the interactive hull plot — when
+		the user clicks an instance dot in the plot, this is the route the
+		click takes back into the dialog's selection state. Safe to call
+		with out-of-range indices (no-op).
+		"""
+		try:
+			idx = int(idx)
+		except (TypeError, ValueError):
+			return
+		if not (0 <= idx < len(self._instance_checked)):
+			return
+		self._instance_checked[idx] = not self._instance_checked[idx]
+		self._refresh_list()
+		selected = self._selected_instance_names()
+		self._refresh_name(selected=selected)
+		self._refresh_preview(selected=selected)
+		self._refresh_generate_button(selected=selected)
+		self._refresh_selection_count(selected=selected)
 
 	@objc.python_method
 	def _set_all_checks(self, value: bool) -> None:
@@ -1938,12 +1951,8 @@ class VFClampDialog:
 			pass
 		scrubbed = message.replace(os.path.expanduser('~'), '~')
 		scrubbed = scrubbed.replace('/var/folders/', '/<tmp>/').replace('/private/var/folders/', '/<tmp>/')
-		# Attach the full untruncated message as a tooltip so users can
-		# hover for the complete error.
-		try:
-			self.w.statusLabel._nsObject.setToolTip_(scrubbed)
-		except (AttributeError, RuntimeError):
-			pass
+		# v1.2.9: status label is gone; the log pane shows the full
+		# message and is selectable so users can copy it directly.
 		self._set_status(scrubbed, error=True)
 		self.w.generateButton.enable(True)
 		try:
@@ -2348,6 +2357,21 @@ class VFClampDialog:
 				self._hull_plot_view.setHull_axisRanges_axisColors_(
 					hull, self._fvar_axis_ranges, axis_colors,
 				)
+				# v1.2.9 interactive plot: feed it the per-instance coords +
+				# current selection mask + a callback that toggles whichever
+				# instance the user clicks.
+				try:
+					selected_indices = set(self._selected_instance_indices())
+				except Exception:
+					selected_indices = set()
+				try:
+					self._hull_plot_view.setInstances_selectedIndices_onClick_(
+						self._instance_coords,
+						selected_indices,
+						self._toggle_instance_at_index,
+					)
+				except (AttributeError, RuntimeError):
+					pass
 				self._hull_plot_view.setHidden_(False)
 			except Exception:
 				# Plot failed for some reason — fall back to chips below.
@@ -2494,17 +2518,14 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _set_status(self, message, error=False):
-		"""Update the status label AND append the message to the log pane.
+		"""Append a status message to the log pane.
 
-		The narrow status label is kept for the case where the user has
-		auto-hidden the log; the log pane is the authoritative surface for
-		anything longer than ~80 characters.
+		v1.2.9 dropped the duplicate single-line status label that used to
+		sit below the action bar. The LOG pane is now the single source of
+		truth for status output; everything else (success, failure, hints)
+		flows through here.
 		"""
 		text = f'Error: {message}' if error else message
-		try:
-			self.w.statusLabel.set(text)
-		except (AttributeError, RuntimeError):
-			pass
 		# Don't double-log blanks (e.g. status-clears during normal flow).
 		if message:
 			self._log_append(text)

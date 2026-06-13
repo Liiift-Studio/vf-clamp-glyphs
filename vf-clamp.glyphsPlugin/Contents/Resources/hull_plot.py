@@ -61,6 +61,11 @@ if _APPKIT_AVAILABLE:
 			self._hull = {}            # type: Dict[str, Tuple[float, float]]
 			self._axis_ranges = {}     # type: Dict[str, Tuple[float, float, float]]
 			self._axis_colors = {}     # type: Dict[str, Tuple[float, float, float]]
+			# v1.2.9 interactive plot: per-instance coords + selection mask +
+			# Python callback the view invokes when a dot is clicked.
+			self._instances = []       # type: List[Dict[str, float]]
+			self._selected = set()     # type: set[int]
+			self._on_instance_click = None  # callable(index) → None
 			return self
 
 		def setHull_axisRanges_axisColors_(self, hull, axis_ranges, axis_colors):
@@ -78,9 +83,70 @@ if _APPKIT_AVAILABLE:
 			except Exception:
 				pass
 
+		def setInstances_selectedIndices_onClick_(self, instances, selected_indices, on_click):
+			"""Make the plot interactive.
+
+			``instances`` — list of per-instance coord dicts, parallel to the
+			dialog's instance list. Each dict maps axis tag → float value.
+			``selected_indices`` — iterable of ints; rows currently ticked.
+			``on_click`` — Python callable invoked with the clicked instance's
+			index whenever the user clicks the dot. Pass ``None`` to disable
+			click handling (e.g. before any font is loaded).
+			"""
+			self._instances = list(instances or [])
+			try:
+				self._selected = set(int(i) for i in (selected_indices or []))
+			except (TypeError, ValueError):
+				self._selected = set()
+			self._on_instance_click = on_click
+			try:
+				self.setNeedsDisplay_(True)
+			except Exception:
+				pass
+
 		def isFlipped(self):
 			"""Use top-left origin so layout maths matches everything else."""
 			return True
+
+		def acceptsFirstMouse_(self, event):
+			"""Accept clicks even when the dialog is in the background."""
+			return True
+
+		def mouseDown_(self, event):
+			"""Toggle the instance nearest to the click point.
+
+			Hit tests against the most recent ``_instance_hit_zones`` set
+			built by ``_draw_two_axes`` — so we always reflect what was
+			last drawn. Hit radius is 8 px (comfortable for trackpad use).
+			"""
+			cb = self._on_instance_click
+			zones = getattr(self, '_instance_hit_zones', None)
+			if cb is None or not zones:
+				return
+			try:
+				loc = self.convertPoint_fromView_(
+					event.locationInWindow(), None,
+				)
+			except (AttributeError, RuntimeError):
+				return
+			HIT_RADIUS_SQ = 8.0 * 8.0
+			best_idx = None
+			best_dist_sq = HIT_RADIUS_SQ
+			lx, ly = loc.x, loc.y
+			for idx, cx, cy in zones:
+				dx = cx - lx
+				dy = cy - ly
+				dsq = dx * dx + dy * dy
+				if dsq <= best_dist_sq:
+					best_idx = idx
+					best_dist_sq = dsq
+			if best_idx is not None:
+				try:
+					cb(best_idx)
+				except Exception:
+					# A throwing callback must never tear down the AppKit
+					# event loop. Swallow and move on.
+					pass
 
 		def drawRect_(self, rect):
 			"""Paint the hull. All failures are swallowed (see class docstring)."""
@@ -255,6 +321,38 @@ if _APPKIT_AVAILABLE:
 			)
 			outline.setLineWidth_(1.0)
 			outline.stroke()
+
+			# v1.2.9 interactive plot: draw a dot per instance + remember
+			# their pixel positions so mouseDown_ can hit-test.
+			self._instance_hit_zones = []  # list of (idx, cx, cy)
+			for idx, coords in enumerate(self._instances):
+				try:
+					if tag_x not in coords or tag_y not in coords:
+						continue
+					vx = float(coords[tag_x])
+					vy = float(coords[tag_y])
+				except (TypeError, ValueError):
+					continue
+				cx = normx(vx)
+				cy = normy(vy)
+				is_sel = idx in self._selected
+				radius = 4.0 if is_sel else 3.0
+				dot = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+					cx - radius, cy - radius, radius * 2, radius * 2,
+				))
+				if is_sel:
+					# Filled accent dot for selected instances.
+					self._axis_color(tag_x).set()
+					dot.fill()
+					NSColor.labelColor().set()
+					dot.setLineWidth_(1.0)
+					dot.stroke()
+				else:
+					# Outline-only for unselected instances.
+					NSColor.tertiaryLabelColor().set()
+					dot.setLineWidth_(1.5)
+					dot.stroke()
+				self._instance_hit_zones.append((idx, cx, cy))
 
 			# Axis labels under the plot
 			label = f'{tag_x}: {lo_x:g}–{hi_x:g}   {tag_y}: {lo_y:g}–{hi_y:g}'

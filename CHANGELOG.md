@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.9] — 2026-06-13
+
+- **Removed the redundant single-line status label** at the bottom of the action bar. The LOG pane already shows everything that used to appear there; every save was producing a duplicate "Saved: …" line below the buttons. `_set_status()` now writes only to the log.
+- **Interactive hull plot**: clicking instance dots in the 2-axis plot toggles their selection. Each instance is drawn as a small dot at its design-space coordinates — filled accent for selected rows, outlined for unselected. New `HullPlotView.setInstances_selectedIndices_onClick_(...)` accepts the per-instance coords, the current selection mask, and a Python callback. `mouseDown_` does an 8-px-radius hit test against the most-recent draw to decide which instance to toggle, then invokes the callback. New helpers `_selected_instance_indices()` and `_toggle_instance_at_index()` in the dialog handle the round trip.
+- 1-axis plot and 3+-axis chips view stay non-interactive for now — they're trivial enough that the instance list checkboxes are still the right surface.
+
 ## [1.2.8] — 2026-06-13
 
 - **Fix: "The file 'clone (Autosaved).glyphs' doesn't exist." alert after every save**. `gsfont.copy()` (the first step of `clamp_gsfont`) silently registers the clone with Glyphs' shared `NSDocumentController` and gives it an autosave path that is never actually written. When the cloned GSFont was later garbage-collected, Glyphs' autosave subsystem looked for that phantom file and surfaced a modal alert. New helper `_evict_clone_tracking(gsfont)` in `gsfont_core.py` calls `parent.updateChangeCount_(0)` → `NSDocumentController.removeDocument_(parent)` → `parent.close()` to make Glyphs forget the clone before the autosave check fires. Wired into `save_gsfont_to_glyphs`, `export_gsfont_binary_via_glyphs`, and the preview-compile temp-doc cleanup in `font_registration.py`.
