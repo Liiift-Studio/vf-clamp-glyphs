@@ -132,6 +132,10 @@ if _APPKIT_AVAILABLE:
 			# Falls back to a computed tag-as-int when CoreText can't give
 			# us the axes, which works for most fonts but not all.
 			self._axis_id_by_tag = {}  # type: Dict[str, int]
+			# v1.2.10 animation probe: optional HullPlotView that receives
+			# the current variations each tick so it can render a live ring
+			# inside the hull rectangle. Set via setProbeTarget_.
+			self._probe_target = None
 			return self
 
 		# --------- public PyObjC entry points (Python-callable) ----------
@@ -180,6 +184,17 @@ if _APPKIT_AVAILABLE:
 					self._axis_id_by_tag = {}
 			self.setNeedsDisplay_(True)
 
+		def setProbeTarget_(self, view):
+			"""Wire a HullPlotView that should receive live animation values.
+
+			Called once at dialog construction time. While the timer is
+			running, each ``tick_`` pushes the current ``_current_variations``
+			dict into ``view.setProbeCoords_`` so the hull plot can draw a
+			small ring at the active design-space coordinate. Pass ``None``
+			to detach.
+			"""
+			self._probe_target = view
+
 		def setFontSize_(self, size):
 			try:
 				self._font_size = float(size)
@@ -198,7 +213,11 @@ if _APPKIT_AVAILABLE:
 				self._timer = None
 
 		def stopAnimating(self):
-			"""Stop the timer if running."""
+			"""Stop the timer if running.
+
+			Also clears the probe target's ring so it doesn't visually hang
+			at the last frame's coordinates when the specimen freezes.
+			"""
 			t = self._timer
 			self._timer = None
 			if t is not None:
@@ -206,13 +225,30 @@ if _APPKIT_AVAILABLE:
 					t.invalidate()
 				except (AttributeError, RuntimeError):
 					pass
+			target = self._probe_target
+			if target is not None:
+				try:
+					target.setProbeCoords_({})
+				except (AttributeError, RuntimeError):
+					pass
 
 		# --------- ObjC selectors --------------------------------------
 
 		def tick_(self, _timer):
-			"""NSTimer callback — advance the animation phase and redraw."""
+			"""NSTimer callback — advance the animation phase and redraw.
+
+			Also forwards the freshly-computed variations to the optional
+			probe target so the hull plot can render the active position in
+			lockstep with the specimen.
+			"""
 			self._anim_progress = (self._anim_progress + FRAME_INTERVAL) % ANIM_PERIOD
 			self.setNeedsDisplay_(True)
+			target = self._probe_target
+			if target is not None:
+				try:
+					target.setProbeCoords_(self._current_variations())
+				except (AttributeError, RuntimeError):
+					pass
 
 		def isOpaque(self):
 			return False

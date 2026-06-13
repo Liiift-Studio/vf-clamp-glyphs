@@ -813,11 +813,21 @@ class VFClampDialog:
 				try:
 					win._window.contentView().addSubview_(pv)
 					self._preview_view = pv
-					# Constrain HOHO Anes to fit the column width — 64 pt at
-					# the dialog's ~370-px right column overflows on bold
-					# axis values. Drop to 44 pt for a comfortable fit.
+					# Specimen size — 60 pt fills more of the ~370-px right
+					# column than the previous 44 pt without overflowing on
+					# the heaviest weights of typical fonts. If a future font
+					# overflows here, scale back rather than reverting the
+					# whole bump.
 					try:
-						pv.setFontSize_(44.0)
+						pv.setFontSize_(60.0)
+					except (AttributeError, RuntimeError):
+						pass
+					# v1.2.10 animation probe: feed the specimen's tick into
+					# the hull plot so the user sees a live ring tracking the
+					# current variation values inside the hull rectangle.
+					try:
+						if self._hull_plot_view is not None:
+							pv.setProbeTarget_(self._hull_plot_view)
 					except (AttributeError, RuntimeError):
 						pass
 				except (AttributeError, RuntimeError):

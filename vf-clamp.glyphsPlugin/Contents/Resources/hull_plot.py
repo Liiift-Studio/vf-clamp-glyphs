@@ -28,6 +28,12 @@ except Exception:  # noqa: BLE001 — AppKit may be entirely missing under CI
 # on either side of a 1-axis bar.
 PLOT_PAD = 16
 
+# Extra inset INSIDE the plot rectangle so per-instance dots drawn at the
+# extremes of the axis range stay fully inside the chart border instead of
+# clipping against it. Sized to match the largest selected-dot radius +
+# a half-pixel of breathing room.
+DOT_INSET = 6
+
 
 def is_available() -> bool:
 	"""Return True iff AppKit is importable on this runtime."""
@@ -66,6 +72,10 @@ if _APPKIT_AVAILABLE:
 			self._instances = []       # type: List[Dict[str, float]]
 			self._selected = set()     # type: set[int]
 			self._on_instance_click = None  # callable(index) → None
+			# v1.2.10 animation probe: live axis values pushed in by the
+			# AnimatedPreviewView each frame so the plot can show where the
+			# specimen currently is inside the licensed design space.
+			self._probe_coords = {}    # type: Dict[str, float]
 			return self
 
 		def setHull_axisRanges_axisColors_(self, hull, axis_ranges, axis_colors):
@@ -78,6 +88,22 @@ if _APPKIT_AVAILABLE:
 			self._hull = dict(hull or {})
 			self._axis_ranges = dict(axis_ranges or {})
 			self._axis_colors = dict(axis_colors or {})
+			try:
+				self.setNeedsDisplay_(True)
+			except Exception:
+				pass
+
+		def setProbeCoords_(self, coords):
+			"""Set the live animation probe position.
+
+			``coords`` — mapping ``{tag: value}`` of the variations the
+			specimen view is currently rendering. Called ~30×/sec by the
+			AnimatedPreviewView's tick. Only the axes that match the
+			current 2D plot's tags actually render — everything else is
+			retained but ignored. Passing ``None`` or ``{}`` clears the probe
+			(useful when the preview stops animating).
+			"""
+			self._probe_coords = dict(coords) if coords else {}
 			try:
 				self.setNeedsDisplay_(True)
 			except Exception:
@@ -294,13 +320,19 @@ if _APPKIT_AVAILABLE:
 			border.setLineWidth_(1.0)
 			border.stroke()
 
-			# Hull rect
+			# Hull rect. Map values into an inset rectangle so dots at the
+			# axis extremes (e.g. wght=min, opsz=max) stay fully inside the
+			# plot border instead of clipping against it.
+			inner_x = plot_x + DOT_INSET
+			inner_y = plot_y + DOT_INSET
+			inner_w = max(1.0, plot_w - 2 * DOT_INSET)
+			inner_h = max(1.0, plot_h - 2 * DOT_INSET)
 			def normx(v):
-				return plot_x + (v - ax_x_min) / (ax_x_max - ax_x_min) * plot_w
+				return inner_x + (v - ax_x_min) / (ax_x_max - ax_x_min) * inner_w
 			def normy(v):
 				# Top-left origin (isFlipped): higher y_tag value = lower y pixel.
 				t = (v - ax_y_min) / (ax_y_max - ax_y_min)
-				return plot_y + plot_h - t * plot_h
+				return inner_y + inner_h - t * inner_h
 
 			x0 = normx(lo_x)
 			x1 = normx(hi_x)
@@ -354,9 +386,44 @@ if _APPKIT_AVAILABLE:
 					dot.stroke()
 				self._instance_hit_zones.append((idx, cx, cy))
 
-			# Axis labels under the plot
+			# Animation probe ring — render last so it sits above the dots.
+			# Drawn as a hollow circle at the current animation position so
+			# the user can see, in real time, which point inside the licensed
+			# design space the HOHO Anes specimen is rendering at.
+			probe_x = self._probe_coords.get(tag_x)
+			probe_y = self._probe_coords.get(tag_y)
+			if probe_x is not None and probe_y is not None:
+				try:
+					px = normx(float(probe_x))
+					py = normy(float(probe_y))
+					probe_r = 6.0
+					ring = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+						px - probe_r, py - probe_r, probe_r * 2, probe_r * 2,
+					))
+					NSColor.labelColor().set()
+					ring.setLineWidth_(1.5)
+					ring.stroke()
+				except (TypeError, ValueError):
+					pass
+
+			# Axis labels under the plot. Hull range first (what's licensed),
+			# full font range second in muted text so the user can see the
+			# selection in the context of the design space.
 			label = f'{tag_x}: {lo_x:g}–{hi_x:g}   {tag_y}: {lo_y:g}–{hi_y:g}'
 			self._draw_label(label, NSMakePoint(pad, plot_y + plot_h + 2))
+			full = (
+				f'full: {tag_x} {ax_x_min:g}–{ax_x_max:g}   '
+				f'{tag_y} {ax_y_min:g}–{ax_y_max:g}'
+			)
+			try:
+				attrs = {
+					NSForegroundColorAttributeName: NSColor.tertiaryLabelColor(),
+					NSFontAttributeName: NSFont.systemFontOfSize_(9.0),
+				}
+				s = NSAttributedString.alloc().initWithString_attributes_(full, attrs)
+				s.drawAtPoint_(NSMakePoint(pad, plot_y + plot_h + 16))
+			except Exception:
+				pass
 
 		def _draw_label(self, text, point):
 			"""Render a small primary-color label at ``point``."""

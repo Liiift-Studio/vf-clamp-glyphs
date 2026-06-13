@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.10] — 2026-06-13
+
+- **Hull plot dots no longer clip at the edges**: the 2-axis plot now maps instance coordinates into a 6-px inset rectangle so a dot at the axis minimum/maximum sits fully inside the chart border instead of straddling it. New `DOT_INSET` constant in `hull_plot.py`.
+- **Animation probe ring**: while the HOHO Anes specimen animates, a small hollow circle now tracks the live position inside the hull rectangle so you can see which point of the licensed design space the specimen is currently rendering at. Wired by `AnimatedPreviewView.setProbeTarget_(hullView)`; each `tick_` pushes `_current_variations()` into `HullPlotView.setProbeCoords_`. The ring clears automatically when animation stops.
+- **HOHO Anes specimen bumped from 44 pt to 60 pt** so it fills more of the right column. The old 44 pt was a defensive overcorrection after a 64-pt overflow on a very-bold-axis font; 60 pt is the comfortable middle ground.
+- **Hull plot now shows the full font axis range** in a muted second line below the selection range — `full: wght 100–900  opsz 12–42` — so the hull rectangle reads in context of the design space, not in isolation.
+
 ## [1.2.9] — 2026-06-13
 
 - **Removed the redundant single-line status label** at the bottom of the action bar. The LOG pane already shows everything that used to appear there; every save was producing a duplicate "Saved: …" line below the buttons. `_set_status()` now writes only to the log.

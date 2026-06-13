@@ -15,9 +15,9 @@
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.2.9</string>
+	<string>1.2.10</string>
 	<key>CFBundleVersion</key>
-	<string>23</string>
+	<string>24</string>
 	<key>GlyphsRequiresAppVersion</key>
 	<string>3</string>
 	<key>LSMinimumSystemVersion</key>
