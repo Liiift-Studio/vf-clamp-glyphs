@@ -1013,10 +1013,12 @@ class VFClampDialog:
 			except (AttributeError, RuntimeError):
 				pass
 
-		# Status label sits between the spinner and the Reveal button.
-		status_right_offset = PAD + gen_w + gap + can_w + gap + rev_w + gap
+		# Status label spans the full bottom row below the buttons + hints
+		# so long error messages aren't truncated to ~74 px. Multi-line and
+		# selectable so the user can copy a full traceback if needed; the
+		# accompanying tooltip carries the full untruncated message too.
 		win.statusLabel = vanilla.TextBox(
-			(PAD + 400, y + 12, -status_right_offset, 18),
+			(PAD, y + 38, -PAD, 14),
 			'',
 			sizeStyle='small',
 			selectable=True,
@@ -1029,12 +1031,12 @@ class VFClampDialog:
 		return y + 36 + PAD
 
 	# Reserved height of the bottom action bar. Must fit:
-	# - the 32-px-tall primary Generate button
-	# - the 24-px-tall Cancel + Reveal buttons (positioned at y + 10)
-	# - the shortcut-hints text below (positioned at y + 38ish)
-	# 56 gives a comfortable bottom margin; 36 was the cause of the clipped
-	# Cancel/Generate buttons reported in v1.2.1.
-	ACTION_BAR_H = 56
+	# - the 32-px-tall primary Generate button at y + 8
+	# - the 24-px-tall Cancel + Reveal buttons at y + 12
+	# - the shortcut-hints text at y + 18
+	# - the full-width status label at y + 38 (height 14)
+	# 64 leaves a clean bottom margin and keeps error messages on-screen.
+	ACTION_BAR_H = 64
 
 	def _compute_window_height(self):
 		"""Return the total window height. v1.2.0 fixes the layout — no instance-count math."""
@@ -1848,8 +1850,21 @@ class VFClampDialog:
 		"""Main-thread handler invoked after a generate failure."""
 		if not self._alive():
 			return
+		# Always log the full traceback to stderr so it reaches the Glyphs
+		# Macro Panel — the in-dialog status row truncates long messages.
+		try:
+			print(f'[vf-clamp generate failure] {message}', file=sys.stderr)
+			traceback.print_exc(file=sys.stderr)
+		except Exception:  # noqa: BLE001
+			pass
 		scrubbed = message.replace(os.path.expanduser('~'), '~')
 		scrubbed = scrubbed.replace('/var/folders/', '/<tmp>/').replace('/private/var/folders/', '/<tmp>/')
+		# Attach the full untruncated message as a tooltip so users can
+		# hover for the complete error.
+		try:
+			self.w.statusLabel._nsObject.setToolTip_(scrubbed)
+		except (AttributeError, RuntimeError):
+			pass
 		self._set_status(scrubbed, error=True)
 		self.w.generateButton.enable(True)
 		try:

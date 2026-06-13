@@ -25,6 +25,8 @@ try:
 		CTFontManagerRegisterFontsForURL,
 		CTFontManagerUnregisterFontsForURL,
 		CTFontManagerCreateFontDescriptorsFromURL,
+		CTFontCreateWithFontDescriptor,
+		CTFontCopyVariationAxes,
 		kCTFontManagerScopeProcess,
 	)
 	_APPKIT_AVAILABLE = True
@@ -36,6 +38,36 @@ def is_available() -> bool:
 	return _APPKIT_AVAILABLE
 
 
+def _pick_variable_descriptor(descriptors):
+	"""Pick the descriptor that exposes variation axes.
+
+	``CTFontManagerCreateFontDescriptorsFromURL`` returns one descriptor per
+	font in the file. For a variable font with named instances, that's the
+	variable font itself PLUS one descriptor per named instance — and the
+	instance descriptors are already collapsed (no axes). If we blindly
+	pick descriptors[0] we may land on an instance, which is why preview
+	animation appeared to do nothing even though the right glyphs rendered.
+
+	Walk every descriptor, materialise a probe CTFont, ask for its axes,
+	and return the first descriptor that reports a non-empty axis list.
+	Falls back to descriptors[0] when nothing has axes (legitimately
+	static font).
+	"""
+	if not descriptors:
+		return None
+	for desc in descriptors:
+		try:
+			probe = CTFontCreateWithFontDescriptor(desc, 12.0, None)
+			if probe is None:
+				continue
+			axes = CTFontCopyVariationAxes(probe)
+			if axes and len(axes) > 0:
+				return desc
+		except (AttributeError, RuntimeError, TypeError):
+			continue
+	return descriptors[0]
+
+
 def register_font_at_path(path: str) -> Tuple[bool, Optional[object]]:
 	"""Register a font file with the process-wide font namespace.
 
@@ -43,8 +75,8 @@ def register_font_at_path(path: str) -> Tuple[bool, Optional[object]]:
 	  - ``ok`` is True if registration succeeded or the font was already
 	    registered (CTFontManager returns False with a "duplicate" error in
 	    that case, which we treat as success for preview purposes).
-	  - ``descriptor`` is the first NSFontDescriptor extracted from the file,
-	    suitable for passing to AnimatedPreviewView.setFontDescriptor_.
+	  - ``descriptor`` is the variable font descriptor extracted from the
+	    file (when available), or the first static one as fallback.
 
 	Returns ``(False, None)`` on a hard error.
 	"""
@@ -61,8 +93,9 @@ def register_font_at_path(path: str) -> Tuple[bool, Optional[object]]:
 		# is already registered. That's fine for preview — we still extract
 		# its descriptor below.
 		descriptors = CTFontManagerCreateFontDescriptorsFromURL(url)
-		if descriptors and len(descriptors) > 0:
-			return True, descriptors[0]
+		picked = _pick_variable_descriptor(descriptors)
+		if picked is not None:
+			return True, picked
 		return bool(ok), None
 	except Exception:  # noqa: BLE001
 		traceback.print_exc()

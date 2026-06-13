@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.5] — 2026-06-13
+
+- **Real fix for invisible wght animation**: `CTFontManagerCreateFontDescriptorsFromURL` returns one descriptor per font face in the file — for a variable font with named instances, that's the variable font itself **plus** one descriptor per named instance with axes already collapsed. v1.2.3 / v1.2.4 took `descriptors[0]` blindly, which often landed on an instance descriptor with no variable axes left to animate. v1.2.5 walks every descriptor, probes each with `CTFontCreateWithFontDescriptor`, queries `CTFontCopyVariationAxes`, and returns the first one that exposes a non-empty axis list (falls back to `descriptors[0]` for legitimately static fonts).
+- **Readable error messages**: status label was only ~74 px wide so any error longer than "Error: …" got clipped. Moved to a full-width row above the bottom edge. Long error tooltips now also attach for hover. Full Python traceback is unconditionally logged to stderr so the Glyphs Macro Panel always carries the complete error, even when the status label truncates.
+- **Action bar height** bumped 56 → 64 to fit the new status row without re-clipping the buttons.
+
 ## [1.2.4] — 2026-06-13
 
 - **Fix: axis animation now visible for source fonts with non-standard axis identifiers**. v1.2.3 computed identifiers from OpenType tags (`'wght' → 0x77676874`) but the compiled font may report different identifiers in its `fvar` table. Now `setFontDescriptor_` queries the real axes via `CTFontCopyVariationAxes` and builds a `tag → identifier` map so `NSFontVariationAttribute` receives the keys the font actually understands. Falls back to the computed identifier when the CoreText query fails.
