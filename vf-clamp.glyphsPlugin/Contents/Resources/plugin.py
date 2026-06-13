@@ -535,18 +535,32 @@ class VFClampDialog:
 	# ------------------------------------------------------------------
 
 	def _build_zone_source(self, y):
-		"""Zone 1 — Source picker. Returns the new y after the zone."""
+		"""Zone 1 — Source picker. Returns the new y after the zone.
+
+		IMPORTANT: vanilla.Box's re-parenting via ``box.attr = win.widget`` is
+		unreliable across Glyphs builds — widgets stay attached to the window
+		root regardless. So we create the Box as a decorative frame only and
+		place every child widget at window-relative coordinates by adding
+		``PAD`` to X and ``y`` to Y for inputs that the previous (broken)
+		layout treated as box-relative.
+		"""
 		win = self.w
 		PAD = self.PAD
-		box = vanilla.Box((PAD, y, -PAD, self.ZONE1_H))
-		win.zone1 = box
+		win.zone1 = vanilla.Box((PAD, y, -PAD, self.ZONE1_H))
 
-		# Title row
-		win.zone1Title = self._semibold_label((12, 6, -12, 18), 'SOURCE')
+		# Window-relative coordinate origin for widgets that should appear
+		# inside this zone's visual frame.
+		left = PAD + 12
+		right_inset = PAD + 12
+
+		# Title row — small caps label at the top of the box's interior.
+		win.zone1Title = self._semibold_label(
+			(left, y + 6, -right_inset, 18), 'SOURCE',
+		)
 
 		# Radio row
 		win.sourceRadio = vanilla.RadioGroup(
-			(12, 30, 220, 22),
+			(left, y + 30, 220, 22),
 			['Open Font', 'File'],
 			isVertical=False,
 			callback=self._on_source_radio_changed,
@@ -560,18 +574,18 @@ class VFClampDialog:
 		# Input row — both widgets share Y; visibility flips with mode.
 		# File mode
 		win.fontPathField = vanilla.EditText(
-			(12, 60, -110, 22),
+			(left, y + 60, -(right_inset + 100), 22),
 			placeholder='Drag a .ttf/.otf/.woff/.woff2 here or click Browse…',
 			readOnly=True,
 		)
 		win.browseButton = vanilla.Button(
-			(-100, 59, 88, 24),
+			(-(right_inset + 90), y + 59, 88, 24),
 			'Browse…',
 			callback=self._on_browse,
 		)
 		# Open-Font mode
 		win.gsfontPopup = vanilla.PopUpButton(
-			(12, 60, -12, 24),
+			(left, y + 60, -right_inset, 24),
 			[self._GSFONT_POPUP_EMPTY],
 			callback=self._on_gsfont_chosen,
 		)
@@ -589,50 +603,51 @@ class VFClampDialog:
 		# field exists so the overlay's frame matches the EditText.
 		self._install_drop_handler()
 
-		# Add all widgets to the Box. vanilla.Box accepts attribute assignment.
-		box.title = win.zone1Title
-		box.radio = win.sourceRadio
-		box.path = win.fontPathField
-		box.browse = win.browseButton
-		box.gsfont = win.gsfontPopup
-
 		return y + self.ZONE1_H + PAD
 
 	def _build_zone_dashboard(self, y):
-		"""Zone 2 — instance picker (left) + output preview (right)."""
+		"""Zone 2 — instance picker (left) + output preview (right).
+
+		See _build_zone_source for why all widgets use window-relative coords
+		instead of being nested inside the Box.
+		"""
 		win = self.w
 		PAD = self.PAD
 		ZONE_H = self.ZONE2_H
-		box = vanilla.Box((PAD, y, -PAD, ZONE_H))
-		win.zone2 = box
+		win.zone2 = vanilla.Box((PAD, y, -PAD, ZONE_H))
 
-		# Compute the two halves. Box inner width ≈ W - 2*PAD - 2*inset.
+		# Compute the two halves in window-relative coords. The Box draws a
+		# decorative frame at (PAD, y, -PAD, ZONE_H); widgets are placed at
+		# window-X = PAD + box-interior-X, window-Y = y + box-interior-Y.
 		inset = 12
 		inner_w = self.W - 2 * PAD - 2 * inset
 		col_w = (inner_w - self.COL_GAP) // 2
-		left_x = inset
-		right_x = inset + col_w + self.COL_GAP
+		left_x = PAD + inset
+		right_x = PAD + inset + col_w + self.COL_GAP
+		# Shorthand: convert a box-interior Y to a window-relative Y.
+		def Y(box_y):
+			return y + box_y
 
 		# ---------- LEFT HALF — Instance picker ----------
 		win.instanceHeader = self._semibold_label(
-			(left_x, 6, col_w, 18), 'INSTANCES (0 OF 0)',
+			(left_x, Y(6), col_w, 18), 'INSTANCES (0 OF 0)',
 		)
 		# Filter SearchBox — falls back to EditText on older vanilla builds.
 		try:
 			win.filterBox = vanilla.SearchBox(
-				(left_x, 30, col_w, 22),
+				(left_x, Y(30), col_w, 22),
 				placeholder='Filter…',
 				callback=self._on_filter_changed,
 			)
 		except AttributeError:
 			win.filterBox = vanilla.EditText(
-				(left_x, 30, col_w, 22),
+				(left_x, Y(30), col_w, 22),
 				placeholder='Filter…',
 				callback=self._on_filter_changed,
 			)
 
 		# Bulk select buttons row
-		btn_y = 60
+		btn_y = Y(60)
 		win.allBtn = vanilla.Button(
 			(left_x, btn_y, 56, 22), 'All',
 			callback=self._on_select_all, sizeStyle='small',
@@ -667,7 +682,7 @@ class VFClampDialog:
 
 		# vanilla.List — replaces the prior ScrollView-of-CheckBox layout.
 		list_y = btn_y + 30
-		list_h = ZONE_H - list_y - 10
+		list_h = ZONE_H - (list_y - y) - 10
 		try:
 			win.instanceList = vanilla.List(
 				(left_x, list_y, col_w, list_h),
@@ -690,7 +705,7 @@ class VFClampDialog:
 			# Fallback: vanilla.List with CheckBoxListCell is unavailable on
 			# this Glyphs build — surface a placeholder so the dialog still
 			# opens. (Smart-select / filter are no-ops in the fallback.)
-			win.instanceList = vanilla.TextBox(
+			win.instanceList = vanilla.TextBox(  # type: ignore[assignment]
 				(left_x, list_y, col_w, list_h),
 				'(instance list unavailable on this Glyphs build)',
 				sizeStyle='small',
@@ -715,10 +730,10 @@ class VFClampDialog:
 
 		# ---------- RIGHT HALF — Output preview ----------
 		win.previewHeader = self._semibold_label(
-			(right_x, 6, col_w, 18), 'OUTPUT PREVIEW',
+			(right_x, Y(6), col_w, 18), 'OUTPUT PREVIEW',
 		)
 		win.previewName = vanilla.TextBox(
-			(right_x, 30, col_w, 22),
+			(right_x, Y(30), col_w, 22),
 			'',
 			selectable=True,
 		)
@@ -729,16 +744,16 @@ class VFClampDialog:
 			pass
 
 		# Hull plot — custom NSView when available, else a chips text box.
-		plot_y = 60
+		# The plot view uses window-relative coords; do NOT addSubview_ on the
+		# Box (its re-parenting is unreliable across Glyphs builds). Mount on
+		# the window's content view instead.
+		plot_y_box = 60
 		plot_h = 140
+		plot_y = Y(plot_y_box)
 		view = make_hull_plot_view((right_x, plot_y, col_w, plot_h))
 		if view is not None:
-			# Mount the raw NSView as a sibling of the Box's internal NSView.
 			try:
-				box._nsObject.addSubview_(view)
-				# Translate the box-relative origin so the rect lands inside the box.
-				# vanilla.Box's content view starts at the inner padding; addSubview_
-				# uses the box's own coordinate space.
+				win._window.contentView().addSubview_(view)
 				self._hull_plot_view = view
 			except (AttributeError, RuntimeError):
 				self._hull_plot_view = None
@@ -773,23 +788,34 @@ class VFClampDialog:
 		return y + ZONE_H + PAD
 
 	def _build_zone_output(self, y):
-		"""Zone 3 — preset, output name, format, folder."""
+		"""Zone 3 — preset, output name, format, folder.
+
+		See _build_zone_source for why the Box is decorative-only and all
+		child widgets use window-relative coords.
+		"""
 		win = self.w
 		PAD = self.PAD
 		ZONE_H = self.ZONE3_H
-		box = vanilla.Box((PAD, y, -PAD, ZONE_H))
-		win.zone3 = box
+		win.zone3 = vanilla.Box((PAD, y, -PAD, ZONE_H))
 
-		# Layout grid — right-aligned label column + control column
+		# Layout grid — right-aligned label column + control column.
+		# Window-relative X coords: PAD + box-interior X.
 		LABEL_W = 90
-		LABEL_X = 12
-		CTRL_X = 12 + LABEL_W + 8
+		LABEL_X = PAD + 12
+		CTRL_X = PAD + 12 + LABEL_W + 8
+		# Right inset for widgets anchored to the right edge.
+		R_INSET = PAD + 12
+
+		def Y(box_y):
+			return y + box_y
 
 		row_y = 8
 		# --- Preset
-		win.presetLabel = self._right_label((LABEL_X, row_y + 2, LABEL_W, 20), 'Preset:')
+		win.presetLabel = self._right_label(
+			(LABEL_X, Y(row_y + 2), LABEL_W, 20), 'Preset:',
+		)
 		win.presetPopup = vanilla.PopUpButton(
-			(CTRL_X, row_y, 240, 22),
+			(CTRL_X, Y(row_y), 240, 22),
 			[self._PRESET_NONE_LABEL, self._PRESET_SAVE_LABEL, self._PRESET_MANAGE_LABEL],
 			callback=self._on_preset_chosen,
 		)
@@ -800,9 +826,11 @@ class VFClampDialog:
 		row_y += 30
 
 		# --- Output name
-		win.nameLabel = self._right_label((LABEL_X, row_y + 2, LABEL_W, 20), 'Output Name:')
+		win.nameLabel = self._right_label(
+			(LABEL_X, Y(row_y + 2), LABEL_W, 20), 'Output Name:',
+		)
 		win.nameField = vanilla.EditText(
-			(CTRL_X, row_y, -12, 22),
+			(CTRL_X, Y(row_y), -R_INSET, 22),
 			placeholder='e.g. MyFont Light-Bold',
 			callback=self._on_name_edited,
 		)
@@ -813,9 +841,11 @@ class VFClampDialog:
 		row_y += 30
 
 		# --- Format + description
-		win.formatLabel = self._right_label((LABEL_X, row_y + 2, LABEL_W, 20), 'Format:')
+		win.formatLabel = self._right_label(
+			(LABEL_X, Y(row_y + 2), LABEL_W, 20), 'Format:',
+		)
 		win.formatPopup = vanilla.PopUpButton(
-			(CTRL_X, row_y, 120, 22),
+			(CTRL_X, Y(row_y), 120, 22),
 			list(self.BINARY_FORMATS),
 			callback=self._on_format_changed,
 		)
@@ -824,7 +854,7 @@ class VFClampDialog:
 		except (AttributeError, RuntimeError):
 			pass
 		win.formatDescription = vanilla.TextBox(
-			(CTRL_X + 130, row_y + 2, -12, 18),
+			(CTRL_X + 130, Y(row_y + 2), -R_INSET, 18),
 			'',
 			sizeStyle='small',
 			selectable=True,
@@ -837,20 +867,22 @@ class VFClampDialog:
 		row_y += 30
 
 		# --- Folder
-		win.folderLabel = self._right_label((LABEL_X, row_y + 2, LABEL_W, 20), 'Folder:')
+		win.folderLabel = self._right_label(
+			(LABEL_X, Y(row_y + 2), LABEL_W, 20), 'Folder:',
+		)
 		# Layout: [folderField][Choose…][▾ Recent]
 		win.folderField = vanilla.EditText(
-			(CTRL_X, row_y, -218, 22),
+			(CTRL_X, Y(row_y), -(R_INSET + 206), 22),
 			placeholder='Default: same folder as source',
 			readOnly=True,
 		)
 		win.folderButton = vanilla.Button(
-			(-210, row_y - 1, 90, 24),
+			(-(R_INSET + 200), Y(row_y - 1), 90, 24),
 			'Choose…',
 			callback=self._on_choose_folder,
 		)
 		win.recentFoldersPopup = vanilla.PopUpButton(
-			(-112, row_y - 1, 100, 24),
+			(-(R_INSET + 100), Y(row_y - 1), 100, 24),
 			[self._RECENT_HEADER_LABEL],
 			callback=self._on_recent_folder_chosen,
 		)

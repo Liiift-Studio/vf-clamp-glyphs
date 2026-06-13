@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.1] — 2026-06-13
+
+- **Fix critical layout bug in v1.2.0**: zone-build methods used box-relative coordinates while widgets were attached to the window root, causing every widget in zones 1/2/3 to render stacked at the top-left of the window with massive overlap. Cause: `vanilla.Box` re-parenting via `box.attr = win.widget` is unreliable across Glyphs builds; widgets stay attached to whatever container they were originally assigned to. Fix: keep the Boxes as decorative frames only, place every child widget at window-relative coordinates (add `PAD` to X, add `y` to Y), drop the broken `box.title = win.title` re-assignments, and mount the hull plot NSView on `win._window.contentView()` instead of `box._nsObject`.
+
 ## [1.2.0] — 2026-06-12
 
 Major UX release. The dialog is restructured into a clear three-zone
