@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.11] — 2026-06-13
+
+Four dialog-rendering refinements found via the new `tools/render_preview.py` harness:
+
+- **Hull fill softened from 0.55 → 0.30 alpha** so per-instance dots inside the hull rectangle stay legible instead of being washed out by the accent colour.
+- **Unselected dots use secondaryLabelColor instead of tertiaryLabelColor**. The tertiary tier was disappearing into the dark Glyphs panel; the bump still keeps unselected dots clearly subordinate to the filled selected ones.
+- **Probe ring rendered as a two-pass halo + bright stroke** (3.5 px dark halo, 2 px label stroke, radius 7.5) so it stays visible whether it's over the translucent hull fill, sitting on a selected dot, or floating in empty design space.
+- **Axis labels read "wght: pinned 253"** instead of the awkward "wght: 253–253" when a selection collapses an axis to a single value.
+
 ## [1.2.10] — 2026-06-13
 
 - **Hull plot dots no longer clip at the edges**: the 2-axis plot now maps instance coordinates into a 6-px inset rectangle so a dot at the axis minimum/maximum sits fully inside the chart border instead of straddling it. New `DOT_INSET` constant in `hull_plot.py`.

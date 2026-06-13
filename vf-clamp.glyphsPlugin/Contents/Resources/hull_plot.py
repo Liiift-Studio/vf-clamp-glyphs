@@ -340,7 +340,11 @@ if _APPKIT_AVAILABLE:
 			y1 = normy(lo_y)
 			fill_w = max(2.0, x1 - x0)
 			fill_h = max(2.0, y1 - y0)
-			self._axis_color(tag_x).colorWithAlphaComponent_(0.55).set()
+			# Soften the hull fill so dots inside the rectangle stay legible
+			# instead of washing into the accent colour. 0.55 alpha was
+			# enough to read the rect's bounds but bullied the dots; 0.30
+			# leaves the same shape signal while letting the dots breathe.
+			self._axis_color(tag_x).colorWithAlphaComponent_(0.30).set()
 			fill_path = NSBezierPath.bezierPathWithRect_(
 				NSMakeRect(x0, y0, fill_w, fill_h),
 			)
@@ -380,8 +384,12 @@ if _APPKIT_AVAILABLE:
 					dot.setLineWidth_(1.0)
 					dot.stroke()
 				else:
-					# Outline-only for unselected instances.
-					NSColor.tertiaryLabelColor().set()
+					# Outline-only for unselected instances. secondaryLabelColor
+					# is brighter than tertiaryLabelColor, which made the
+					# unselected dots vanish into the dark Glyphs panel. The
+					# new contrast level is still clearly subordinate to the
+					# filled selected dots.
+					NSColor.secondaryLabelColor().set()
 					dot.setLineWidth_(1.5)
 					dot.stroke()
 				self._instance_hit_zones.append((idx, cx, cy))
@@ -396,20 +404,36 @@ if _APPKIT_AVAILABLE:
 				try:
 					px = normx(float(probe_x))
 					py = normy(float(probe_y))
-					probe_r = 6.0
+					probe_r = 7.5
+					# Two-pass ring: a dark halo first, then a bright stroke
+					# on top. This guarantees enough contrast whether the
+					# probe is sitting over the translucent hull fill, a dot
+					# inside the hull, or empty design space.
+					halo = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+						px - probe_r, py - probe_r, probe_r * 2, probe_r * 2,
+					))
+					NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.55).set()
+					halo.setLineWidth_(3.5)
+					halo.stroke()
 					ring = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
 						px - probe_r, py - probe_r, probe_r * 2, probe_r * 2,
 					))
 					NSColor.labelColor().set()
-					ring.setLineWidth_(1.5)
+					ring.setLineWidth_(2.0)
 					ring.stroke()
 				except (TypeError, ValueError):
 					pass
 
 			# Axis labels under the plot. Hull range first (what's licensed),
 			# full font range second in muted text so the user can see the
-			# selection in the context of the design space.
-			label = f'{tag_x}: {lo_x:g}–{hi_x:g}   {tag_y}: {lo_y:g}–{hi_y:g}'
+			# selection in the context of the design space. Axes whose
+			# selection collapses to a single value get a "pinned" tag
+			# instead of an awkward "253–253" range.
+			def _fmt(tag, lo, hi):
+				if lo == hi:
+					return f'{tag}: pinned {lo:g}'
+				return f'{tag}: {lo:g}–{hi:g}'
+			label = f'{_fmt(tag_x, lo_x, hi_x)}   {_fmt(tag_y, lo_y, hi_y)}'
 			self._draw_label(label, NSMakePoint(pad, plot_y + plot_h + 2))
 			full = (
 				f'full: {tag_x} {ax_x_min:g}–{ax_x_max:g}   '
