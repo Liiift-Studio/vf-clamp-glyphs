@@ -28,7 +28,7 @@ sys.path.insert(0, PLUGIN_RESOURCES)
 from AppKit import (  # noqa: E402
 	NSApplication, NSBitmapImageRep, NSBitmapImageFileTypePNG,
 	NSGraphicsContext, NSColor, NSRectFill, NSWindow, NSBackingStoreBuffered,
-	NSImage, NSCompositingOperationSourceOver,
+	NSImage, NSCompositingOperationSourceOver, NSAppearance, NSAffineTransform,
 )
 from Foundation import NSMakeRect, NSMakePoint, NSMakeSize  # noqa: E402
 
@@ -82,37 +82,79 @@ def hull_from(instances, selected_indices):
 def render_view_to_png(view, out_path, bg=(0.13, 0.13, 0.13, 1.0)):
 	"""Draw ``view`` into an offscreen bitmap and write a PNG.
 
-	The view is attached to a hidden NSWindow first so its backing store
-	is valid — drawing a window-less view via cacheDisplayInRect_ silently
-	produces a blank bitmap on modern AppKit.
+	Strategy: use ``cacheDisplayInRect_toBitmapImageRep_`` (which honours
+	the view's own drawRect_ and AppKit text path) to get a transparent-
+	background rendering, then composite that PNG over a fresh dark bitmap
+	so the result matches how the view looks inside the Glyphs panel.
+
+	Two subtleties that bit us:
+
+	* ``cacheDisplayInRect_toBitmapImageRep_`` wipes any pre-fill, so we
+	  can't paint a dark background BEFORE calling it. The two-pass
+	  composite is the workaround.
+	* ``NSColor.labelColor()`` adapts to the *effective* appearance. Without
+	  forcing Dark Aqua on the parent window, labels resolve dark and
+	  vanish against the dark backdrop. We force it.
 	"""
 	bounds = view.bounds()
 	w = int(bounds.size.width)
 	h = int(bounds.size.height)
 
+	# Hidden window so the view has a valid backing AND a dark appearance.
 	window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
 		NSMakeRect(0, 0, w, h), 0, NSBackingStoreBuffered, False,
 	)
+	try:
+		window.setAppearance_(
+			NSAppearance.appearanceNamed_('NSAppearanceNameDarkAqua'),
+		)
+	except (AttributeError, RuntimeError):
+		pass
 	window.contentView().addSubview_(view)
+	try:
+		view.setAppearance_(
+			NSAppearance.appearanceNamed_('NSAppearanceNameDarkAqua'),
+		)
+	except (AttributeError, RuntimeError):
+		pass
 
-	bitmap = view.bitmapImageRepForCachingDisplayInRect_(bounds)
-	if bitmap is None:
+	# Pass 1 — let the view render onto its own (possibly transparent) bg.
+	transp = view.bitmapImageRepForCachingDisplayInRect_(bounds)
+	if transp is None:
 		print(f'! bitmapImageRepForCachingDisplayInRect_ returned nil for {out_path}')
 		return False
+	view.cacheDisplayInRect_toBitmapImageRep_(bounds, transp)
 
-	# Paint the dialog-ish dark background first so transparent regions of
-	# the view (the hull plot deliberately clears its bg) look like the real
-	# Glyphs panel rather than checkerboard transparency.
-	ctx = NSGraphicsContext.graphicsContextWithBitmapImageRep_(bitmap)
+	# Pass 2 — composite onto an opaque dark bitmap so the saved PNG looks
+	# like the view does inside Glyphs (the surrounding panel is dark).
+	dark = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+		None, w, h, 8, 4, True, False, 'NSCalibratedRGBColorSpace', 0, 0,
+	)
+	ctx = NSGraphicsContext.graphicsContextWithBitmapImageRep_(dark)
 	NSGraphicsContext.saveGraphicsState()
 	NSGraphicsContext.setCurrentContext_(ctx)
 	NSColor.colorWithCalibratedRed_green_blue_alpha_(*bg).set()
 	NSRectFill(NSMakeRect(0, 0, w, h))
+	# Wrap the transparent rep in an NSImage. The view used a flipped
+	# (top-left) coord system, so the bitmap's pixel data has y=0 at the
+	# visual top. We want the composite target (bottom-left) to receive
+	# it right-side-up — use drawInRect_fromRect_operation_fraction_
+	# respectFlipped_hints_ with respectFlipped=True so AppKit applies the
+	# correct y orientation (which mirrors *placement* without mirroring
+	# the actual glyph bitmaps inside).
+	img = NSImage.alloc().initWithSize_(NSMakeSize(w, h))
+	img.addRepresentation_(transp)
+	img.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
+		NSMakeRect(0, 0, w, h),
+		NSMakeRect(0, 0, w, h),
+		NSCompositingOperationSourceOver,
+		1.0,
+		True,
+		None,
+	)
 	NSGraphicsContext.restoreGraphicsState()
 
-	view.cacheDisplayInRect_toBitmapImageRep_(bounds, bitmap)
-
-	data = bitmap.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
+	data = dark.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
 	if data is None:
 		print(f'! PNG encode failed for {out_path}')
 		return False
@@ -185,13 +227,13 @@ def main():
 	selected = [int(x) for x in args.selected.split(',') if x.strip()]
 	hull = hull_from(instances, selected)
 
-	# Compute axis_ranges from the full fixture so the plot shows the hull
-	# in context of the design space — same source of truth the dialog uses.
+	# Compute axis_ranges from a wider-than-fixture design space so the
+	# hull rectangle reads as a *subset* of the full space, the way it
+	# does for real fonts (a 5-of-36 selection should clearly not fill the
+	# whole chart).
 	axis_ranges = {
-		'wght': (float(min(w for _, w in WEIGHTS)),
-				 float(WEIGHTS[len(WEIGHTS) // 2][1]),
-				 float(max(w for _, w in WEIGHTS))),
-		'opsz': (float(min(SIZES)), float(SIZES[0]), float(max(SIZES))),
+		'wght': (100.0, 400.0, 900.0),
+		'opsz': (8.0, 12.0, 72.0),
 	}
 	axis_colors = {
 		'wght': (0.46, 0.74, 1.00),
