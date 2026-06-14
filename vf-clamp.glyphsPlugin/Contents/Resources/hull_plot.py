@@ -30,9 +30,9 @@ PLOT_PAD = 16
 
 # Extra inset INSIDE the plot rectangle so per-instance dots drawn at the
 # extremes of the axis range stay fully inside the chart border instead of
-# clipping against it. Sized to match the largest selected-dot radius +
-# a half-pixel of breathing room.
-DOT_INSET = 6
+# clipping against it. Sized to match the largest selected-dot radius (5)
+# plus a couple pixels of breathing room.
+DOT_INSET = 8
 
 
 def is_available() -> bool:
@@ -372,7 +372,11 @@ if _APPKIT_AVAILABLE:
 				cx = normx(vx)
 				cy = normy(vy)
 				is_sel = idx in self._selected
-				radius = 4.0 if is_sel else 3.0
+				# v1.2.12: enlarged the gap between selected and unselected
+				# radii (5.0 vs 2.5) after a multi-designer review said the
+				# 4-vs-3 split read as the same-size dot in different colours
+				# rather than as a clear hierarchy.
+				radius = 5.0 if is_sel else 2.5
 				dot = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
 					cx - radius, cy - radius, radius * 2, radius * 2,
 				))

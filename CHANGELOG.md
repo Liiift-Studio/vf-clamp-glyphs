@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.12] — 2026-06-13
+
+Four refinements driven by a 5-designer review panel (type designer, information designer, interaction designer, visual designer, accessibility engineer) all reviewing snapshots from the new `tools/render_dialog.py` full-dialog mock harness:
+
+- **Hull plot grew from 140 → 175 px tall** so the 4 dot rows of a typical 4-opsz/9-weight font fit with breathing room and the axis labels below get a real gap. The plot-to-specimen gap tightens from 32 → 22 to absorb the change without resizing the window.
+- **Specimen size tuned from 60 → 54 pt** to match the slightly tighter preview region underneath the larger plot. Still visually dominant but no longer crowding its caption.
+- **Selected vs unselected dot hierarchy strengthened**: selected dots grew from radius 4 → 5 while unselected dropped from 3 → 2.5. The split now reads as a real hierarchy instead of two same-size dots in different colours. `DOT_INSET` bumped from 6 → 8 to keep the larger dots inside the chart border.
+- **Action bar shortcut chips ("⌘A All", "⌘D None", "⌘I Invert", "⏎ Generate")** swapped from `tertiaryLabelColor` → `secondaryLabelColor` so they're legible against the dark Glyphs panel instead of effectively invisible.
+- **Instance list values now align in a monospaced column**: names are left-justified to the widest name in the font and a monospaced font is installed on the display column, so a scan down the wght/opsz values lands on a consistent x-coordinate row to row.
+
 ## [1.2.11] — 2026-06-13
 
 Four dialog-rendering refinements found via the new `tools/render_preview.py` harness:

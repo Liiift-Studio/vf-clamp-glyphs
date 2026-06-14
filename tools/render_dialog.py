@@ -352,18 +352,26 @@ class DialogMockView(NSView):
 			size=11.0,
 			color=NSColor.secondaryLabelColor(),
 		)
-		# Hull plot — same dimensions plugin.py uses (plot_y_box=60, plot_h=140).
+		# Hull plot — same dimensions plugin.py uses (plot_y_box=60, plot_h=175).
 		plot_y = y + 60
-		plot_h = 140
+		plot_h = 175
 		# (Actual HullPlotView is added as a subview by the caller — its
 		# frame matches this rectangle. We just leave the rect blank here.)
 
-		# Size estimate label
+		# Size estimate label + selection count — both sit between the hull
+		# plot and the animated specimen so the user can see how many
+		# instances are licensed and how big the output will be.
 		_text(
 			st.get('size_estimate', ''),
 			NSMakePoint(right_x, plot_y + plot_h + 6),
 			size=10.5,
 			color=NSColor.secondaryLabelColor(),
+		)
+		_text(
+			f'{len(st["checked"])} instances selected',
+			NSMakePoint(right_x + col_w - 130, plot_y + plot_h + 6),
+			size=10.5,
+			color=NSColor.tertiaryLabelColor(),
 		)
 
 		# (AnimatedPreviewView added as subview below the size estimate.)
@@ -437,7 +445,7 @@ class DialogMockView(NSView):
 		for chip in left_chips:
 			_text(
 				chip, NSMakePoint(cx, ab_y + 4),
-				size=10.5, color=NSColor.tertiaryLabelColor(),
+				size=10.5, color=NSColor.secondaryLabelColor(),
 			)
 			cx += 70
 		# Right side: Cancel + Generate
@@ -499,7 +507,7 @@ def render_dialog(state, anim_phase, out_path, font_path=None):
 	col_w = (W - 2 * PAD - 2 * BOX_INSET - COL_GAP) // 2
 
 	plot_y = zone2_y + 60
-	plot_h = 140
+	plot_h = 175
 	plot = make_hull_plot_view((right_x, plot_y, col_w, plot_h))
 	# axis_ranges wider than fixture so the hull rect sits as a subset.
 	axis_ranges = {
@@ -523,11 +531,12 @@ def render_dialog(state, anim_phase, out_path, font_path=None):
 		})
 	root.addSubview_(plot)
 
-	# Same math as plugin.py: preview sits 32 px below plot bottom.
-	preview_y = plot_y + plot_h + 32
+	# Same math as plugin.py (v1.2.12): preview sits 22 px below plot bottom,
+	# specimen at 54 pt to fit the tighter preview region.
+	preview_y = plot_y + plot_h + 22
 	preview_h = ZONE2_H - (preview_y - zone2_y) - 10
 	preview = make_preview_view((right_x, preview_y, col_w, preview_h))
-	preview.setFontSize_(60.0)
+	preview.setFontSize_(54.0)
 	preview.setHull_(state['hull'])
 	preview._anim_progress = anim_phase * ANIM_PERIOD
 	if font_path:

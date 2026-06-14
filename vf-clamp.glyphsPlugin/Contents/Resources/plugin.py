@@ -729,6 +729,26 @@ class VFClampDialog:
 		except (AttributeError, RuntimeError):
 			pass
 
+		# v1.2.12: install a monospaced font on the "Instance" column so
+		# the ljust-padded display strings from _build_list_items actually
+		# render at consistent column widths. Without this the proportional
+		# system font would still leave the wght/opsz values ragged.
+		try:
+			tv = None
+			try:
+				tv = win.instanceList.getNSTableView()
+			except (AttributeError, RuntimeError):
+				tv = getattr(win.instanceList, '_tableView', None)
+			if tv is not None:
+				cols = tv.tableColumns()
+				if cols and len(cols) >= 2:
+					mono = NSFont.monospacedSystemFontOfSize_weight_(
+						NSFont.smallSystemFontSize(), 0.0,
+					)
+					cols[1].dataCell().setFont_(mono)
+		except (AttributeError, RuntimeError):
+			pass
+
 		# Bulk-select controls and filter hidden until a font is loaded so
 		# dead affordances don't surface a stale "click All" with nothing to
 		# select. Same pattern as v1.1.x.
@@ -762,7 +782,12 @@ class VFClampDialog:
 		# left. Convert top-y → bottom-y before constructing the frame.
 		# Vanilla widgets auto-flip; raw NSView addSubview_ does not.
 		plot_y_box = 60
-		plot_h = 140
+		# Bumped from 140 to 175 after a multi-designer review (v1.2.12):
+		# the chart at 140 px was too cramped to read 3+ rows of instance
+		# dots and forced the axis labels into the bottom margin. 175 px
+		# fits 4 dot rows comfortably and leaves a real label gap, while
+		# still leaving room for a tighter HOHO Anes specimen below.
+		plot_h = 175
 		plot_y = Y(plot_y_box)
 		window_h = self._compute_window_height()
 		plot_y_flipped = window_h - plot_y - plot_h
@@ -803,7 +828,10 @@ class VFClampDialog:
 
 		# --- Animated VF specimen preview ("HOHO Anes") -----------------
 		# Same top→bottom Y conversion as the hull plot above.
-		preview_top_y = plot_y + plot_h + 32   # 32 px below the size-estimate label
+		# Gap tightened from 32 → 22 (v1.2.12) so the bigger 175-px plot
+		# above still leaves a workable preview region underneath without
+		# growing ZONE2_H or the overall window height.
+		preview_top_y = plot_y + plot_h + 22
 		preview_h = ZONE_H - (preview_top_y - y) - 10
 		preview_y_flipped = window_h - preview_top_y - preview_h
 		self._preview_view = None
@@ -813,13 +841,14 @@ class VFClampDialog:
 				try:
 					win._window.contentView().addSubview_(pv)
 					self._preview_view = pv
-					# Specimen size — 60 pt fills more of the ~370-px right
-					# column than the previous 44 pt without overflowing on
-					# the heaviest weights of typical fonts. If a future font
-					# overflows here, scale back rather than reverting the
-					# whole bump.
+					# Specimen size — bumped from 60 → 54 in v1.2.12. The
+					# 60-pt setting from v1.2.10 was visually dominant in
+					# the right column and started overflowing once the
+					# hull plot grew from 140 → 175 px. 54 pt keeps the
+					# specimen the focal point of the lower-right region
+					# without crowding the caption.
 					try:
-						pv.setFontSize_(60.0)
+						pv.setFontSize_(54.0)
 					except (AttributeError, RuntimeError):
 						pass
 					# v1.2.10 animation probe: feed the specimen's tick into
@@ -1022,7 +1051,12 @@ class VFClampDialog:
 		)
 		try:
 			cell = win.shortcutHints._nsObject.cell()
-			cell.setTextColor_(NSColor.tertiaryLabelColor())
+			# v1.2.12: bumped from tertiaryLabelColor → secondaryLabelColor
+			# after a multi-designer review flagged the chips as effectively
+			# invisible against the dark Glyphs panel. Secondary still reads
+			# as subordinate to the primary Generate button but the hints
+			# are now actually discoverable.
+			cell.setTextColor_(NSColor.secondaryLabelColor())
 		except Exception:
 			pass
 
@@ -1570,9 +1604,24 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _build_list_items(self) -> List[dict]:
-		"""Return the row dicts visible to the user (after filtering)."""
+		"""Return the row dicts visible to the user (after filtering).
+
+		v1.2.12 alignment fix: the display string pads the instance name out
+		to the widest name in the *full* font (so filtered subsets still
+		line up against the rest) before appending the axis values. Paired
+		with the monospaced font installed on the display column in
+		_build_zone_dashboard, this makes the wght/opsz values land on a
+		consistent x-coordinate so a font engineer can scan a column of
+		weights instead of zigzagging across ragged row endings.
+		"""
 		needle = (self._instance_filter or '').lower()
 		self._visible_to_full = []
+		# Compute pad width from the *full* set so filtered rows still
+		# align against the source-of-truth.
+		max_name_len = max(
+			(len(n) for n in self._instance_names), default=0,
+		)
+		pad_to = max_name_len + 2  # two-space gutter before values
 		items = []
 		for full_idx, name in enumerate(self._instance_names):
 			if needle and needle not in name.lower():
@@ -1580,7 +1629,10 @@ class VFClampDialog:
 			self._visible_to_full.append(full_idx)
 			coord = self._instance_coords[full_idx] if full_idx < len(self._instance_coords) else {}
 			coord_summary = '  '.join(f'{tag}={val:g}' for tag, val in coord.items())
-			display = name if not coord_summary else f'{name}    {coord_summary}'
+			if coord_summary:
+				display = f'{name.ljust(pad_to)}{coord_summary}'
+			else:
+				display = name
 			items.append({
 				'checked': self._instance_checked[full_idx],
 				'display': display,
