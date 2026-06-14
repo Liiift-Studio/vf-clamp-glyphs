@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.14] — 2026-06-13
+
+Six refinements landed in one cycle from the second multi-designer review against v1.2.13:
+
+- **Hull plot pulled back from 175 → 150 px** to restore Zone 2 vertical balance — the previous bump starved the specimen area. Plot still reads cleanly for 4-row fonts.
+- **Specimen-to-Zone3 gap restored from 10 → 16 px** so the dialog's vertical rhythm matches PAD throughout (Visual Designer flagged the one-off 10 px as a baseline break).
+- **Tick marks bright** — bumped from `secondaryLabelColor` 1.0 pt → `labelColor` 1.5 pt. Corner labels (`100,8`, `900`, `72`) likewise bumped to `labelColor` (Info + Accessibility agreed).
+- **Unselected dot radius 2.5 → 3.5** so the dots stay clearly visible against the dark Glyphs panel (Accessibility WCAG concern). 5-vs-3.5 selected/unselected ratio still reads as a decisive hierarchy.
+- **Two-up specimen — lightest renders at 75 % of heavy size** so the weight differential is visible at a glance (UX Designer's call). Specimen captions bumped from `secondaryLabelColor` → `labelColor`.
+- **Probe ring shrunk 7.5 → 6.5** so it doesn't visually merge with a 5-px selected dot at the same position.
+- **Accessibility annotations** on `HullPlotView` + `AnimatedPreviewView`: static `setAccessibilityLabel_`, `setAccessibilityRoleDescription_`, `setAccessibilityHelp_` plus dynamic `accessibilityValue()` overrides that report current hull ranges, instance count, and the lightest/heaviest variation values. VoiceOver users can now navigate to and understand both views.
+
 ## [1.2.13] — 2026-06-13
 
 Three previously-held-off design changes implemented in the same iteration cycle (harness-driven, no Glyphs restarts):

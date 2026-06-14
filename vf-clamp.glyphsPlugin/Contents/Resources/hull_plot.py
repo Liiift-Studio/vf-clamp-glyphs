@@ -85,7 +85,49 @@ if _APPKIT_AVAILABLE:
 			self._toggle_highlight_idx = None    # type: Optional[int]
 			self._toggle_highlight_age = 0.0     # seconds since toggle
 			self._toggle_highlight_timer = None
+			# v1.2.14 accessibility: static label + role so VoiceOver users
+			# can at least know the view exists and what it represents. The
+			# dynamic state (current hull, selection count, axis ranges) is
+			# exposed through accessibilityValue() below.
+			try:
+				self.setAccessibilityLabel_('Hull design space chart')
+				self.setAccessibilityRoleDescription_(
+					'2D chart showing the licensed variable font design space',
+				)
+				self.setAccessibilityHelp_(
+					'Visual map of which named instances are licensed. '
+					'Click a dot to toggle that instance. Use the instance '
+					'list to the left for keyboard selection.',
+				)
+			except (AttributeError, RuntimeError):
+				pass
 			return self
+
+		def accessibilityValue(self):
+			"""Dynamic description of the chart's current state.
+
+			Returned to VoiceOver when the view is focused. We summarise:
+			how many instances are selected, the per-axis hull range, and
+			whether each axis is pinned. The user gets a single sentence
+			that conveys what they would otherwise have to visually scan.
+			"""
+			try:
+				n_sel = len(self._selected)
+				n_total = len(self._instances)
+				if not self._hull:
+					return f'No instances selected. {n_total} instances available.'
+				parts = []
+				for tag, (lo, hi) in self._hull.items():
+					if lo == hi:
+						parts.append(f'{tag} pinned at {lo:g}')
+					else:
+						parts.append(f'{tag} from {lo:g} to {hi:g}')
+				return (
+					f'{n_sel} of {n_total} instances selected. '
+					f'Licensed hull: {", ".join(parts)}.'
+				)
+			except Exception:
+				return ''
 
 		def setHull_axisRanges_axisColors_(self, hull, axis_ranges, axis_colors):
 			"""Update the model and request a redraw.
@@ -392,13 +434,12 @@ if _APPKIT_AVAILABLE:
 			# Designer's critical finding that the chart had no numeric scale
 			# ON the chart itself — only a "wght: lo–hi" text line below.
 			#
-			# Ticks are drawn pointing *outward* from the border (negative for
-			# bottom/left) so they don't clash with the dots inside, and
-			# rendered at secondaryLabelColor so they're actually visible
-			# against the dark Glyphs panel.
+			# v1.2.14: bumped from secondaryLabelColor 1.0 pt → labelColor
+			# 1.5 pt after the second designer review said the ticks were
+			# still too faint for reliable discoverability on dark panels.
 			TICK_LEN = 5.0
 			TICK_FRACTIONS = (0.0, 0.5, 1.0)
-			NSColor.secondaryLabelColor().set()
+			NSColor.labelColor().set()
 			ticks = NSBezierPath.bezierPath()
 			for t in TICK_FRACTIONS:
 				# Bottom (x-axis) tick — extends down below the border.
@@ -409,7 +450,7 @@ if _APPKIT_AVAILABLE:
 				ty = plot_y + DOT_INSET + t * (plot_h - 2 * DOT_INSET)
 				ticks.moveToPoint_(NSMakePoint(plot_x, ty))
 				ticks.lineToPoint_(NSMakePoint(plot_x - TICK_LEN, ty))
-			ticks.setLineWidth_(1.0)
+			ticks.setLineWidth_(1.5)
 			ticks.stroke()
 
 			# Corner numeric labels — anchored INSIDE the chart at all four
@@ -417,8 +458,13 @@ if _APPKIT_AVAILABLE:
 			# bounds (the chart sits at PLOT_PAD=16, so there isn't enough
 			# left/right margin for external labels) and makes the chart
 			# read like a coordinate plane.
+			#
+			# v1.2.14: bumped from secondaryLabelColor → labelColor after
+			# the Accessibility Engineer flagged the secondary tier as
+			# insufficient contrast against the dark Glyphs panel for
+			# WCAG AA compliance.
 			corner_attrs = {
-				NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+				NSForegroundColorAttributeName: NSColor.labelColor(),
 				NSFontAttributeName: NSFont.systemFontOfSize_(9.5),
 			}
 			def _corner(text, pt):
@@ -494,11 +540,14 @@ if _APPKIT_AVAILABLE:
 				cx = normx(vx)
 				cy = normy(vy)
 				is_sel = idx in self._selected
-				# v1.2.12: enlarged the gap between selected and unselected
-				# radii (5.0 vs 2.5) after a multi-designer review said the
-				# 4-vs-3 split read as the same-size dot in different colours
-				# rather than as a clear hierarchy.
-				radius = 5.0 if is_sel else 2.5
+				# v1.2.12 widened the gap between selected and unselected
+				# (5.0 vs 2.5) after a multi-designer review said the prior
+				# 4-vs-3 split read as the same-size dot in different colours.
+				# v1.2.14 nudged unselected back up to 3.5 after the
+				# Accessibility Engineer flagged 2.5 px as below the visual
+				# minimum on dark panels (WCAG visual-affordance concern).
+				# 5 vs 3.5 still reads as a decisive hierarchy.
+				radius = 5.0 if is_sel else 3.5
 				dot = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
 					cx - radius, cy - radius, radius * 2, radius * 2,
 				))
@@ -562,7 +611,11 @@ if _APPKIT_AVAILABLE:
 				try:
 					px = normx(float(probe_x))
 					py = normy(float(probe_y))
-					probe_r = 7.5
+					# v1.2.14: shrunk from 7.5 → 6.5 because Info Designer
+					# flagged that a 7.5-px probe drawn over a 5-px selected
+					# dot could read as one combined shape rather than as a
+					# distinct tracker. 6.5 keeps a clear gap and proportion.
+					probe_r = 6.5
 					# Two-pass ring: a dark halo first, then a bright stroke
 					# on top. This guarantees enough contrast whether the
 					# probe is sitting over the translucent hull fill, a dot

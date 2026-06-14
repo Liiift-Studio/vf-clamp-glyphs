@@ -352,9 +352,9 @@ class DialogMockView(NSView):
 			size=11.0,
 			color=NSColor.secondaryLabelColor(),
 		)
-		# Hull plot — same dimensions plugin.py uses (plot_y_box=60, plot_h=175).
+		# Hull plot — same dimensions plugin.py uses (plot_y_box=60, plot_h=150).
 		plot_y = y + 60
-		plot_h = 175
+		plot_h = 150
 		# (Actual HullPlotView is added as a subview by the caller — its
 		# frame matches this rectangle. We just leave the rect blank here.)
 
@@ -507,7 +507,7 @@ def render_dialog(state, anim_phase, out_path, font_path=None):
 	col_w = (W - 2 * PAD - 2 * BOX_INSET - COL_GAP) // 2
 
 	plot_y = zone2_y + 60
-	plot_h = 175
+	plot_h = 150
 	plot = make_hull_plot_view((right_x, plot_y, col_w, plot_h))
 	# axis_ranges wider than fixture so the hull rect sits as a subset.
 	axis_ranges = {
@@ -537,10 +537,10 @@ def render_dialog(state, anim_phase, out_path, font_path=None):
 		})
 	root.addSubview_(plot)
 
-	# Same math as plugin.py (v1.2.12): preview sits 22 px below plot bottom,
-	# specimen at 54 pt to fit the tighter preview region.
+	# Same math as plugin.py (v1.2.14): preview sits 22 px below plot bottom,
+	# bottom margin restored to 16 px to match the PAD rhythm.
 	preview_y = plot_y + plot_h + 22
-	preview_h = ZONE2_H - (preview_y - zone2_y) - 10
+	preview_h = ZONE2_H - (preview_y - zone2_y) - 16
 	preview = make_preview_view((right_x, preview_y, col_w, preview_h))
 	preview.setFontSize_(32.0)
 	preview.setHull_(state['hull'])

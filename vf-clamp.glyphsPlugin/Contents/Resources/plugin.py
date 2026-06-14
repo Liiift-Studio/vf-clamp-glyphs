@@ -782,12 +782,13 @@ class VFClampDialog:
 		# left. Convert top-y → bottom-y before constructing the frame.
 		# Vanilla widgets auto-flip; raw NSView addSubview_ does not.
 		plot_y_box = 60
-		# Bumped from 140 to 175 after a multi-designer review (v1.2.12):
-		# the chart at 140 px was too cramped to read 3+ rows of instance
-		# dots and forced the axis labels into the bottom margin. 175 px
-		# fits 4 dot rows comfortably and leaves a real label gap, while
-		# still leaving room for a tighter HOHO Anes specimen below.
-		plot_h = 175
+		# v1.2.14 pulled back from 175 → 150 after the second designer
+		# review flagged Zone 2's vertical balance as compromised — the
+		# 175-px plot starved the specimen area below. 150 is still a
+		# clear win over the original 140 (more breathing room for the
+		# 4 dot rows + bigger label gap) but leaves the lower half of
+		# the right column workable for the two-up specimen.
+		plot_h = 150
 		plot_y = Y(plot_y_box)
 		window_h = self._compute_window_height()
 		plot_y_flipped = window_h - plot_y - plot_h
@@ -828,11 +829,12 @@ class VFClampDialog:
 
 		# --- Animated VF specimen preview ("HOHO Anes") -----------------
 		# Same top→bottom Y conversion as the hull plot above.
-		# Gap tightened from 32 → 22 (v1.2.12) so the bigger 175-px plot
-		# above still leaves a workable preview region underneath without
-		# growing ZONE2_H or the overall window height.
+		# Gap tightened from 32 → 22 (v1.2.12). Bottom margin restored
+		# from 10 → 16 (v1.2.14) so the specimen-to-Zone3 spacing matches
+		# the rest of the 16 px PAD rhythm — Visual Designer flagged 10
+		# as a one-off break in the dialog's vertical baseline.
 		preview_top_y = plot_y + plot_h + 22
-		preview_h = ZONE_H - (preview_top_y - y) - 10
+		preview_h = ZONE_H - (preview_top_y - y) - 16
 		preview_y_flipped = window_h - preview_top_y - preview_h
 		self._preview_view = None
 		if preview_view_available() and preview_h >= 60:

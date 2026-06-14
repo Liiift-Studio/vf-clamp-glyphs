@@ -136,7 +136,40 @@ if _APPKIT_AVAILABLE:
 			# the current variations each tick so it can render a live ring
 			# inside the hull rectangle. Set via setProbeTarget_.
 			self._probe_target = None
+			# v1.2.14 accessibility: static label + role so VoiceOver users
+			# know the view exists. Dynamic state (the lightest / heaviest
+			# variation values currently shown) is exposed through
+			# accessibilityValue() below.
+			try:
+				self.setAccessibilityLabel_('Specimen preview')
+				self.setAccessibilityRoleDescription_(
+					'Side-by-side preview of the lightest and heaviest '
+					'instances in the licensed design space',
+				)
+				self.setAccessibilityHelp_(
+					'Shows "HOHO Anes" rendered at the two extremes of the '
+					'licensed hull so the user can verify the range visually.',
+				)
+			except (AttributeError, RuntimeError):
+				pass
 			return self
+
+		def accessibilityValue(self):
+			"""Dynamic description of the two extreme variations on display."""
+			try:
+				if not self._hull:
+					return 'No instances selected. Specimen preview is dim.'
+				low_parts = []
+				high_parts = []
+				for tag, (lo, hi) in self._hull.items():
+					low_parts.append(f'{tag} {lo:g}')
+					high_parts.append(f'{tag} {hi:g}')
+				return (
+					f'Lightest extreme: {", ".join(low_parts)}. '
+					f'Heaviest extreme: {", ".join(high_parts)}.'
+				)
+			except Exception:
+				return ''
 
 		# --------- public PyObjC entry points (Python-callable) ----------
 
@@ -298,8 +331,16 @@ if _APPKIT_AVAILABLE:
 			high_vars = {tag: float(hi) for tag, (lo, hi) in self._hull.items()}
 
 			# Build fonts for both extremes; bail if neither resolves.
-			font_low = self._build_font(low_vars)
-			font_high = self._build_font(high_vars)
+			# v1.2.14: render the lightest at 75 % of the heavy size so the
+			# visual weight difference between extremes reads at a glance.
+			# UX Designer flagged the prior equal-size two-up as numerically
+			# correct but visually flat — the size differential restores the
+			# "lighter / heavier" affordance the animated v1.2.10 specimen
+			# used to provide via motion.
+			full_size = self._font_size
+			light_size = full_size * 0.75
+			font_low = self._build_font(low_vars, size=light_size)
+			font_high = self._build_font(high_vars, size=full_size)
 			if font_low is None and font_high is None:
 				return
 
@@ -407,11 +448,15 @@ if _APPKIT_AVAILABLE:
 				f'{tag} {int(v)}' if v == int(v) else f'{tag} {v:.1f}'
 				for tag, v in variations.items()
 			)
+			# v1.2.14: caption colour bumped from secondaryLabelColor →
+			# labelColor so the variation values are immediately readable
+			# rather than requiring focused attention. Accessibility
+			# Engineer flagged the secondary tier as below WCAG AA on dark.
 			value_attrs = {
 				NSFontAttributeName: NSFont.systemFontOfSize_(
 					NSFont.smallSystemFontSize(),
 				),
-				NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+				NSForegroundColorAttributeName: NSColor.labelColor(),
 				NSParagraphStyleAttributeName: para,
 			}
 			val = NSAttributedString.alloc().initWithString_attributes_(
@@ -455,18 +500,24 @@ if _APPKIT_AVAILABLE:
 				i += 1
 			return out
 
-		def _build_font(self, variations):
+		def _build_font(self, variations, size=None):
 			"""Build an NSFont with the given variation settings.
 
 			Returns None if neither a custom descriptor nor a system
 			variable font can be resolved.
+
+			``size`` overrides the view's ``_font_size`` when provided —
+			used by the v1.2.14 two-up renderer to draw the lightest extreme
+			at 75 % of the heavy size so the weight difference is visible at
+			a glance even when the actual variation difference is subtle.
 
 			Axis identifiers come from CTFontCopyVariationAxes on the
 			registered font when available; falls back to computing the
 			tag-as-int when the CoreText axis query failed.
 			"""
 			try:
-				size = self._font_size
+				if size is None:
+					size = self._font_size
 				if self._base_descriptor is not None:
 					base = self._base_descriptor
 				else:
