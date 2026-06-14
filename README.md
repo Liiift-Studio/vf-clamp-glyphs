@@ -1,6 +1,6 @@
 # vf-clamp-glyphs
 
-![vf-clamp dialog inside Glyphs.app](versions/dialog-v1.2.18.png)
+![vf-clamp dialog inside Glyphs.app](screenshots/dialog.png)
 
 A [Glyphs.app](https://glyphsapp.com) plugin that generates restricted variable
 fonts from any exported TTF/OTF variable font file. Select the named instances
