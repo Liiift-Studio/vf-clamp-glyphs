@@ -142,3 +142,25 @@ shasum -a 256 "$OUT" > "$OUT.sha256"
 
 echo "Built $OUT ($ZIP_BYTES bytes, $ZIP_ENTRIES entries, version $PLIST_VERSION)"
 cat "$OUT.sha256"
+
+# Per-build dialog snapshot — best-effort. Renders the dialog mock via the
+# render_dialog harness and saves it to versions/dialog-v$PLIST_VERSION.png
+# so each shipped release has a visual artifact alongside the zip. Skips
+# silently when a Python with PyObjC isn't available (e.g. minimal CI runners)
+# rather than failing the whole build.
+SNAPSHOT_DIR="$ROOT/versions"
+SNAPSHOT_PATH="$SNAPSHOT_DIR/dialog-v$PLIST_VERSION.png"
+mkdir -p "$SNAPSHOT_DIR"
+RENDER_PY="$HOME/.pyenv/shims/python3"
+if [ ! -x "$RENDER_PY" ]; then
+	RENDER_PY="$(command -v python3 || true)"
+fi
+if [ -n "$RENDER_PY" ] && [ -f "$ROOT/tools/render_dialog.py" ]; then
+	if "$RENDER_PY" -c "import objc, AppKit" >/dev/null 2>&1; then
+		"$RENDER_PY" "$ROOT/tools/render_dialog.py" \
+			--out "$SNAPSHOT_PATH" >/dev/null 2>&1 || true
+		if [ -f "$SNAPSHOT_PATH" ]; then
+			echo "Snapshot: versions/dialog-v$PLIST_VERSION.png"
+		fi
+	fi
+fi

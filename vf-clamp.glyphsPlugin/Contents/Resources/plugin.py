@@ -2648,7 +2648,7 @@ class VFClampDialog:
 				ax_parts.append(f'{tag} {a} to {b}')
 		ax_summary = '; '.join(ax_parts) if ax_parts else 'No axes'
 		try:
-			self.w.hullChips._nsObject.setAccessibilityLabel_('Axis hull')
+			self.w.hullChips._nsObject.setAccessibilityLabel_('Axis ranges')
 			self.w.hullChips._nsObject.setAccessibilityValue_(ax_summary)
 		except (AttributeError, RuntimeError):
 			pass

@@ -239,9 +239,10 @@ def clamp_gsfont(gsfont: Any, selected_instance_names: List[str], output_family_
 				'whose coordinates already match a master.'
 			)
 		raise RuntimeError(
-			'No masters fall within the hull of the selected instances. '
-			'vf-clamp cannot reconstruct the design space from instances alone — '
-			'pick at least two instances whose coordinates span existing masters.'
+			'No masters fall within the design-space range of the selected '
+			'instances. vf-clamp cannot reconstruct the design space from '
+			'instances alone — pick at least two instances whose coordinates '
+			'span existing masters.'
 		)
 	new_font.masters = surviving
 

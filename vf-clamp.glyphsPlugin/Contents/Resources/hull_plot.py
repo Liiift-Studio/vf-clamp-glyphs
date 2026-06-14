@@ -175,7 +175,7 @@ if _APPKIT_AVAILABLE:
 			# dynamic state (current hull, selection count, axis ranges) is
 			# exposed through accessibilityValue() below.
 			try:
-				self.setAccessibilityLabel_('Hull design space chart')
+				self.setAccessibilityLabel_('Design space chart')
 				self.setAccessibilityRoleDescription_(
 					'2D chart showing the licensed variable font design space',
 				)
@@ -209,7 +209,7 @@ if _APPKIT_AVAILABLE:
 						parts.append(f'{tag} from {lo:g} to {hi:g}')
 				return (
 					f'{n_sel} of {n_total} instances selected. '
-					f'Licensed hull: {", ".join(parts)}.'
+					f'Licensed design space: {", ".join(parts)}.'
 				)
 			except Exception:
 				return ''

@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.2.16] — 2026-06-13
+
+- **User-facing terminology rename**: "hull" → "design space" / "axis ranges" in everything a user actually reads (VoiceOver labels, accessibility values, error messages, the chips-fallback label). Code-internal `hull`, `_hull`, `compute_hull`, `setHull_` etc. stay — they're correctly typed and the refactor cost is high — but the strings a font engineer actually encounters now use the terminology the type-design community already knows.
+- **Per-build snapshot versioning**: `versions/dialog-v$VERSION.png` now ships alongside every release zip. `scripts/build-zip.sh` runs the render harness as its last step (best-effort, skipped silently when PyObjC is missing) so each shipped version has a visual artifact paired with its commit.
+- Test suite green at 99/99 (algorithm-correctness tests in `tests/` — `core.py` + `gsfont_core.py` paths).
+
 ## [1.2.15] — 2026-06-13
 
 Five remaining-polish items the second designer review flagged, all landed in one pass:

@@ -148,7 +148,7 @@ if _APPKIT_AVAILABLE:
 				)
 				self.setAccessibilityHelp_(
 					'Shows "HOHO Anes" rendered at the two extremes of the '
-					'licensed hull so the user can verify the range visually.',
+					'licensed design space so the user can verify the range.',
 				)
 			except (AttributeError, RuntimeError):
 				pass
