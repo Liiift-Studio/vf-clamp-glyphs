@@ -522,6 +522,12 @@ def render_dialog(state, anim_phase, out_path, font_path=None):
 	plot.setInstances_selectedIndices_onClick_(
 		state['instances'], sorted(state['checked']), None,
 	)
+	# Snapshot the live-toggle highlight at a chosen point in the animation
+	# so we can review what the ring looks like mid-pulse. age must be < 0.4
+	# (HIGHLIGHT_DURATION); higher values produce no visible ring.
+	if state.get('highlight_idx') is not None:
+		plot._toggle_highlight_idx = int(state['highlight_idx'])
+		plot._toggle_highlight_age = float(state.get('highlight_age', 0.15))
 	if 'wght' in state['hull'] and 'opsz' in state['hull']:
 		wlo, whi = state['hull']['wght']
 		olo, ohi = state['hull']['opsz']
@@ -536,7 +542,7 @@ def render_dialog(state, anim_phase, out_path, font_path=None):
 	preview_y = plot_y + plot_h + 22
 	preview_h = ZONE2_H - (preview_y - zone2_y) - 10
 	preview = make_preview_view((right_x, preview_y, col_w, preview_h))
-	preview.setFontSize_(54.0)
+	preview.setFontSize_(32.0)
 	preview.setHull_(state['hull'])
 	preview._anim_progress = anim_phase * ANIM_PERIOD
 	if font_path:
@@ -593,10 +599,17 @@ def main():
 	p.add_argument('--selected', default='1,2,8,18,19')
 	p.add_argument('--anim', type=float, default=0.4)
 	p.add_argument('--font', default=None)
+	p.add_argument('--highlight-idx', type=int, default=None,
+		help='Instance index to freeze mid-toggle-highlight.')
+	p.add_argument('--highlight-age', type=float, default=0.15,
+		help='Age of the highlight in seconds (0..0.4).')
 	args = p.parse_args()
 
 	os.makedirs(os.path.dirname(args.out), exist_ok=True)
 	state = fake_state([int(x) for x in args.selected.split(',') if x.strip()])
+	if args.highlight_idx is not None:
+		state['highlight_idx'] = args.highlight_idx
+		state['highlight_age'] = args.highlight_age
 	ok = render_dialog(state, args.anim, args.out, font_path=args.font)
 	if ok:
 		print(f'→ {args.out}  ({W}×{total_height()})')

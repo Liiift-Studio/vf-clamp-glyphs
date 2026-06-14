@@ -264,27 +264,75 @@ if _APPKIT_AVAILABLE:
 		# --------- private rendering -----------------------------------
 
 		def _draw(self):
+			"""v1.2.13 two-up renderer.
+
+			Replaces the previous single-specimen-animated-through-hull
+			behaviour with a side-by-side display of the *extremes* of the
+			licensed design space:
+
+			  LEFT  — lightest instance  (axis min on every axis)
+			  RIGHT — heaviest instance  (axis max on every axis)
+
+			Each half is captioned with the literal variation values used,
+			so the user is reading the licensed corners of the hull directly
+			instead of inferring a range from a fly-through. Animation
+			infrastructure is retained: probe coords are still pushed to the
+			hull plot each tick so the ring keeps tracking, but the drawn
+			specimen is static once the hull is set.
+			"""
 			bounds = self.bounds()
+			from AppKit import NSRectFill  # local import — Foundation is shared
 			bg = NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.18)
 			bg.set()
-			from AppKit import NSRectFill  # local import — Foundation is shared
 			NSRectFill(bounds)
 
-			# Compute current variation settings from hull + animation phase.
-			variations = self._current_variations()
+			# No-selection state: keep the previous 10% opacity hint so the
+			# preview area doesn't draw the eye when there's nothing to show.
+			if not self._hull:
+				self._draw_hint(bounds)
+				return
+
+			# Compute the two extreme variations from the hull. Pinned axes
+			# (lo == hi) contribute the same value on both sides.
+			low_vars = {tag: float(lo) for tag, (lo, hi) in self._hull.items()}
+			high_vars = {tag: float(hi) for tag, (lo, hi) in self._hull.items()}
+
+			# Build fonts for both extremes; bail if neither resolves.
+			font_low = self._build_font(low_vars)
+			font_high = self._build_font(high_vars)
+			if font_low is None and font_high is None:
+				return
+
+			# Split the view into two equal halves with a soft divider.
+			half_w = bounds.size.width / 2.0
+			divider_x = bounds.size.width / 2.0
+			NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.10).set()
+			NSRectFill(
+				NSMakeRect(divider_x - 0.5, 12, 1.0, bounds.size.height - 24),
+			)
+
+			# Draw each half.
+			self._draw_half(
+				NSMakeRect(0, 0, half_w, bounds.size.height),
+				font_low, low_vars, label='lightest',
+			)
+			self._draw_half(
+				NSMakeRect(half_w, 0, half_w, bounds.size.height),
+				font_high, high_vars, label='heaviest',
+			)
+
+		def _draw_hint(self, bounds):
+			"""Render a faint specimen at 10% opacity when the hull is empty.
+
+			Preserves the v1.2.4 no-selection signalling — a translucent
+			specimen says "this is where the preview will appear" without
+			drawing the eye.
+			"""
+			variations = {}
 			font = self._build_font(variations)
 			if font is None:
 				return
-
-			# No-selection state: render the specimen at 10% opacity so the
-			# preview area doesn't draw the eye when there's nothing to
-			# show. The caption flips to a hint.
-			specimen_alpha = 1.0
-			if not self._hull:
-				specimen_alpha = 0.10
-
-			# Build the attributed specimen string, centred in the view.
-			fg = NSColor.labelColor().colorWithAlphaComponent_(specimen_alpha)
+			fg = NSColor.labelColor().colorWithAlphaComponent_(0.10)
 			para = NSMutableParagraphStyle.alloc().init()
 			para.setAlignment_(NSTextAlignmentCenter)
 			attrs = {
@@ -295,33 +343,88 @@ if _APPKIT_AVAILABLE:
 			specimen = NSAttributedString.alloc().initWithString_attributes_(
 				SPECIMEN_TEXT, attrs,
 			)
-
-			# Centre vertically in the view's bounds.
 			text_size = specimen.size()
-			origin_x = (bounds.size.width - text_size.width) / 2.0
-			origin_y = (bounds.size.height - text_size.height) / 2.0
-			specimen.drawAtPoint_(NSMakePoint(origin_x, origin_y))
-
-			# Caption row beneath: live variation values when animating;
-			# hint text when no selection.
-			caption = self._caption_text(variations)
-			caption_font = NSFont.systemFontOfSize_(NSFont.smallSystemFontSize())
-			caption_color = NSColor.tertiaryLabelColor()
-			if not self._hull:
-				caption_color = NSColor.tertiaryLabelColor().colorWithAlphaComponent_(0.55)
+			specimen.drawAtPoint_(NSMakePoint(
+				(bounds.size.width - text_size.width) / 2.0,
+				(bounds.size.height - text_size.height) / 2.0,
+			))
 			caption_attrs = {
-				NSFontAttributeName: caption_font,
-				NSForegroundColorAttributeName: caption_color,
+				NSFontAttributeName: NSFont.systemFontOfSize_(
+					NSFont.smallSystemFontSize(),
+				),
+				NSForegroundColorAttributeName: NSColor.tertiaryLabelColor()
+					.colorWithAlphaComponent_(0.55),
 				NSParagraphStyleAttributeName: para,
 			}
-			caption_str = NSAttributedString.alloc().initWithString_attributes_(
-				caption, caption_attrs,
+			hint = NSAttributedString.alloc().initWithString_attributes_(
+				'(select instances to preview)', caption_attrs,
 			)
-			cap_size = caption_str.size()
-			caption_str.drawAtPoint_(NSMakePoint(
-				(bounds.size.width - cap_size.width) / 2.0,
-				6,  # bottom margin
+			hsize = hint.size()
+			hint.drawAtPoint_(NSMakePoint(
+				(bounds.size.width - hsize.width) / 2.0, 6,
 			))
+
+		def _draw_half(self, rect, font, variations, label=''):
+			"""Render one specimen + caption inside ``rect``.
+
+			Used by the two-up layout — the specimen is centred horizontally
+			inside ``rect`` and vertically biased toward the top, leaving a
+			fixed 22-px caption strip at the bottom for the variation values.
+			"""
+			if font is None:
+				return
+
+			# Reserve the bottom strip for the caption.
+			caption_h = 22
+			specimen_rect = NSMakeRect(
+				rect.origin.x, rect.origin.y + caption_h,
+				rect.size.width, rect.size.height - caption_h,
+			)
+
+			para = NSMutableParagraphStyle.alloc().init()
+			para.setAlignment_(NSTextAlignmentCenter)
+			fg = NSColor.labelColor()
+			attrs = {
+				NSFontAttributeName: font,
+				NSForegroundColorAttributeName: fg,
+				NSParagraphStyleAttributeName: para,
+			}
+			specimen = NSAttributedString.alloc().initWithString_attributes_(
+				SPECIMEN_TEXT, attrs,
+			)
+			tsize = specimen.size()
+			specimen.drawAtPoint_(NSMakePoint(
+				specimen_rect.origin.x
+					+ (specimen_rect.size.width - tsize.width) / 2.0,
+				specimen_rect.origin.y
+					+ (specimen_rect.size.height - tsize.height) / 2.0,
+			))
+
+			# Caption — just the variation values; the "lightest" / "heaviest"
+			# textual label tested as nearly invisible at 9.5 pt tertiary
+			# colour, and the values self-disclose which side is which.
+			values = '  ·  '.join(
+				f'{tag} {int(v)}' if v == int(v) else f'{tag} {v:.1f}'
+				for tag, v in variations.items()
+			)
+			value_attrs = {
+				NSFontAttributeName: NSFont.systemFontOfSize_(
+					NSFont.smallSystemFontSize(),
+				),
+				NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+				NSParagraphStyleAttributeName: para,
+			}
+			val = NSAttributedString.alloc().initWithString_attributes_(
+				values, value_attrs,
+			)
+			valsize = val.size()
+			val.drawAtPoint_(NSMakePoint(
+				rect.origin.x + (rect.size.width - valsize.width) / 2.0,
+				rect.origin.y + 6,
+			))
+			# Quiet "lightest" parameter is no longer used. Keep the signature
+			# stable so existing callers don't need to change.
+			_ = label
 
 		# --------- helpers ---------------------------------------------
 

@@ -16,6 +16,7 @@ try:
 		NSAttributedString,
 		NSForegroundColorAttributeName,
 		NSFontAttributeName,
+		NSTimer,
 	)
 	from Foundation import NSMakeRect, NSMakePoint  # type: ignore
 	_APPKIT_AVAILABLE = True
@@ -76,6 +77,14 @@ if _APPKIT_AVAILABLE:
 			# AnimatedPreviewView each frame so the plot can show where the
 			# specimen currently is inside the licensed design space.
 			self._probe_coords = {}    # type: Dict[str, float]
+			# v1.2.13 live-toggle highlight: when an instance dot is toggled
+			# (via the checkbox list or a click on the dot itself), draw an
+			# expanding/fading ring around it for ~400 ms so the eye catches
+			# the state change. Driven by an NSTimer that ticks the age
+			# forward at 30 fps and invalidates itself when done.
+			self._toggle_highlight_idx = None    # type: Optional[int]
+			self._toggle_highlight_age = 0.0     # seconds since toggle
+			self._toggle_highlight_timer = None
 			return self
 
 		def setHull_axisRanges_axisColors_(self, hull, axis_ranges, axis_colors):
@@ -88,6 +97,64 @@ if _APPKIT_AVAILABLE:
 			self._hull = dict(hull or {})
 			self._axis_ranges = dict(axis_ranges or {})
 			self._axis_colors = dict(axis_colors or {})
+			try:
+				self.setNeedsDisplay_(True)
+			except Exception:
+				pass
+
+		# Highlight animation: ~400 ms expanding ring around the most-recently
+		# toggled instance dot. Ticked by an NSTimer at 30 fps.
+		HIGHLIGHT_DURATION = 0.40
+		HIGHLIGHT_INTERVAL = 1.0 / 30.0
+		HIGHLIGHT_MAX_RADIUS = 14.0
+
+		def setRecentlyToggled_(self, idx):
+			"""Trigger the live-toggle highlight on the dot at ``idx``.
+
+			Called from the dialog whenever a user flips a checkbox or
+			clicks a dot in the interactive plot. Resets the animation age
+			and (re)starts the NSTimer that drives the redraws.
+			"""
+			try:
+				self._toggle_highlight_idx = int(idx)
+			except (TypeError, ValueError):
+				return
+			self._toggle_highlight_age = 0.0
+			# Cancel any in-flight highlight before starting a new one so
+			# rapid-fire toggles always animate from the latest dot.
+			t = self._toggle_highlight_timer
+			if t is not None:
+				try:
+					t.invalidate()
+				except (AttributeError, RuntimeError):
+					pass
+				self._toggle_highlight_timer = None
+			try:
+				self._toggle_highlight_timer = (
+					NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+						self.HIGHLIGHT_INTERVAL,
+						self, 'tickHighlight:', None, True,
+					)
+				)
+			except (AttributeError, RuntimeError):
+				self._toggle_highlight_timer = None
+			try:
+				self.setNeedsDisplay_(True)
+			except Exception:
+				pass
+
+		def tickHighlight_(self, _timer):
+			"""NSTimer callback — advance the highlight age + invalidate."""
+			self._toggle_highlight_age += self.HIGHLIGHT_INTERVAL
+			if self._toggle_highlight_age >= self.HIGHLIGHT_DURATION:
+				self._toggle_highlight_idx = None
+				t = self._toggle_highlight_timer
+				self._toggle_highlight_timer = None
+				if t is not None:
+					try:
+						t.invalidate()
+					except (AttributeError, RuntimeError):
+						pass
 			try:
 				self.setNeedsDisplay_(True)
 			except Exception:
@@ -320,6 +387,61 @@ if _APPKIT_AVAILABLE:
 			border.setLineWidth_(1.0)
 			border.stroke()
 
+			# v1.2.13: axis tick marks at min / mid / max on each axis with
+			# numeric labels at the chart corners. Addresses the Information
+			# Designer's critical finding that the chart had no numeric scale
+			# ON the chart itself — only a "wght: lo–hi" text line below.
+			#
+			# Ticks are drawn pointing *outward* from the border (negative for
+			# bottom/left) so they don't clash with the dots inside, and
+			# rendered at secondaryLabelColor so they're actually visible
+			# against the dark Glyphs panel.
+			TICK_LEN = 5.0
+			TICK_FRACTIONS = (0.0, 0.5, 1.0)
+			NSColor.secondaryLabelColor().set()
+			ticks = NSBezierPath.bezierPath()
+			for t in TICK_FRACTIONS:
+				# Bottom (x-axis) tick — extends down below the border.
+				tx = plot_x + DOT_INSET + t * (plot_w - 2 * DOT_INSET)
+				ticks.moveToPoint_(NSMakePoint(tx, plot_y + plot_h))
+				ticks.lineToPoint_(NSMakePoint(tx, plot_y + plot_h + TICK_LEN))
+				# Left (y-axis) tick — extends left beyond the border.
+				ty = plot_y + DOT_INSET + t * (plot_h - 2 * DOT_INSET)
+				ticks.moveToPoint_(NSMakePoint(plot_x, ty))
+				ticks.lineToPoint_(NSMakePoint(plot_x - TICK_LEN, ty))
+			ticks.setLineWidth_(1.0)
+			ticks.stroke()
+
+			# Corner numeric labels — anchored INSIDE the chart at all four
+			# corners. Putting them inside keeps everything within the view
+			# bounds (the chart sits at PLOT_PAD=16, so there isn't enough
+			# left/right margin for external labels) and makes the chart
+			# read like a coordinate plane.
+			corner_attrs = {
+				NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+				NSFontAttributeName: NSFont.systemFontOfSize_(9.5),
+			}
+			def _corner(text, pt):
+				NSAttributedString.alloc().initWithString_attributes_(
+					text, corner_attrs,
+				).drawAtPoint_(pt)
+			INSET = 4
+			# Bottom-left: x_min, y_min (chart origin).
+			_corner(
+				f'{ax_x_min:g},{ax_y_min:g}',
+				NSMakePoint(plot_x + INSET, plot_y + plot_h - 13),
+			)
+			# Bottom-right: x_max.
+			_corner(
+				f'{ax_x_max:g}',
+				NSMakePoint(plot_x + plot_w - 28, plot_y + plot_h - 13),
+			)
+			# Top-left: y_max (top in flipped coords).
+			_corner(
+				f'{ax_y_max:g}',
+				NSMakePoint(plot_x + INSET, plot_y + INSET),
+			)
+
 			# Hull rect. Map values into an inset rectangle so dots at the
 			# axis extremes (e.g. wght=min, opsz=max) stay fully inside the
 			# plot border instead of clipping against it.
@@ -397,6 +519,38 @@ if _APPKIT_AVAILABLE:
 					dot.setLineWidth_(1.5)
 					dot.stroke()
 				self._instance_hit_zones.append((idx, cx, cy))
+
+			# v1.2.13 live-toggle highlight — expanding fading ring around
+			# the just-toggled dot. White stroke for high contrast on top
+			# of the translucent hull fill OR empty design space; renders
+			# before the probe ring so the probe still wins z-order when
+			# they overlap.
+			hi_idx = self._toggle_highlight_idx
+			if hi_idx is not None and 0 <= hi_idx < len(self._instances):
+				try:
+					hcoords = self._instances[hi_idx]
+					if tag_x in hcoords and tag_y in hcoords:
+						hx = normx(float(hcoords[tag_x]))
+						hy = normy(float(hcoords[tag_y]))
+						# Eased age 0..1 — radius grows + alpha fades.
+						t = min(
+							1.0,
+							self._toggle_highlight_age / self.HIGHLIGHT_DURATION,
+						)
+						# Smoothstep-ish ease so the ring expands quickly
+						# at first then slows.
+						eased = 1.0 - (1.0 - t) * (1.0 - t)
+						hradius = 6.0 + eased * (self.HIGHLIGHT_MAX_RADIUS - 6.0)
+						halpha = max(0.0, 1.0 - t)
+						hring = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+							hx - hradius, hy - hradius,
+							hradius * 2, hradius * 2,
+						))
+						NSColor.whiteColor().colorWithAlphaComponent_(halpha).set()
+						hring.setLineWidth_(2.5)
+						hring.stroke()
+				except (TypeError, ValueError):
+					pass
 
 			# Animation probe ring — render last so it sits above the dots.
 			# Drawn as a hollow circle at the current animation position so

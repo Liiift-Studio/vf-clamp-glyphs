@@ -841,14 +841,14 @@ class VFClampDialog:
 				try:
 					win._window.contentView().addSubview_(pv)
 					self._preview_view = pv
-					# Specimen size — bumped from 60 → 54 in v1.2.12. The
-					# 60-pt setting from v1.2.10 was visually dominant in
-					# the right column and started overflowing once the
-					# hull plot grew from 140 → 175 px. 54 pt keeps the
-					# specimen the focal point of the lower-right region
-					# without crowding the caption.
+					# Specimen size — v1.2.13 dropped from 54 → 32 because
+					# the preview view became a two-up layout showing the
+					# lightest and heaviest hull instances side by side.
+					# Each half is only ~180 px wide; 32 pt fits "HOHO Anes"
+					# comfortably without bumping the divider on the
+					# heaviest-weight side.
 					try:
-						pv.setFontSize_(54.0)
+						pv.setFontSize_(32.0)
 					except (AttributeError, RuntimeError):
 						pass
 					# v1.2.10 animation probe: feed the specimen's tick into
@@ -1526,12 +1526,18 @@ class VFClampDialog:
 		except (AttributeError, RuntimeError):
 			items = []
 		# Each row in items maps via _visible_to_full to a full-list index.
+		# Track which rows changed so we can fire the v1.2.13 highlight on
+		# the matching dot in the hull plot.
+		changed_full_idx = None
 		for row_idx, item in enumerate(items):
 			if row_idx >= len(self._visible_to_full):
 				continue
 			full_idx = self._visible_to_full[row_idx]
 			try:
-				self._instance_checked[full_idx] = bool(item.get('checked'))
+				new = bool(item.get('checked'))
+				if self._instance_checked[full_idx] != new:
+					self._instance_checked[full_idx] = new
+					changed_full_idx = full_idx
 			except (IndexError, AttributeError):
 				pass
 		selected = self._selected_instance_names()
@@ -1539,6 +1545,13 @@ class VFClampDialog:
 		self._refresh_preview(selected=selected)
 		self._refresh_generate_button(selected=selected)
 		self._refresh_selection_count(selected=selected)
+		# v1.2.13: live-toggle highlight on the changed dot.
+		if changed_full_idx is not None:
+			try:
+				if self._hull_plot_view is not None:
+					self._hull_plot_view.setRecentlyToggled_(changed_full_idx)
+			except (AttributeError, RuntimeError):
+				pass
 
 	def _on_list_selection(self, sender):
 		"""vanilla.List selectionCallback — currently unused but reserved."""
@@ -1689,6 +1702,13 @@ class VFClampDialog:
 		self._refresh_preview(selected=selected)
 		self._refresh_generate_button(selected=selected)
 		self._refresh_selection_count(selected=selected)
+		# v1.2.13: fire the live-toggle highlight on the hull plot so the
+		# user gets a brief visual confirmation that the click landed.
+		try:
+			if self._hull_plot_view is not None:
+				self._hull_plot_view.setRecentlyToggled_(idx)
+		except (AttributeError, RuntimeError):
+			pass
 
 	@objc.python_method
 	def _set_all_checks(self, value: bool) -> None:

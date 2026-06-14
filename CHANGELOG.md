@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.13] — 2026-06-13
+
+Three previously-held-off design changes implemented in the same iteration cycle (harness-driven, no Glyphs restarts):
+
+- **Two-up specimen** replaces the animated 60→54 pt single specimen with a static side-by-side rendering of the hull's lightest (left) and heaviest (right) extremes at 32 pt. Each side captioned with its variation values (e.g. `wght 190  ·  opsz 12`). The Type Designer's recommendation: the specimen should prove the *range* of licensed instances, not animate through the middle.
+- **Axis tick marks + corner labels** on the hull plot. Ticks at min/mid/max on each axis (extending outward from the chart border) plus numeric corner labels INSIDE the chart (`100,8` bottom-left, `900` bottom-right, `72` top-left). The Information Designer's critical finding: the chart had no numeric scale ON it.
+- **Live-toggle highlight ring**: when a checkbox or dot is toggled, an expanding white ring fades around the corresponding instance dot for ~400 ms. Driven by an NSTimer that ticks at 30 fps and invalidates itself when the animation finishes. The dialog's `_toggle_instance_at_index` and `_on_list_edit` both fire `setRecentlyToggled_(idx)` so click and checkbox paths share one feedback channel.
+
 ## [1.2.12] — 2026-06-13
 
 Four refinements driven by a 5-designer review panel (type designer, information designer, interaction designer, visual designer, accessibility engineer) all reviewing snapshots from the new `tools/render_dialog.py` full-dialog mock harness:
