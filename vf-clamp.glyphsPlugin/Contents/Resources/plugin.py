@@ -893,9 +893,13 @@ class VFClampDialog:
 		except (AttributeError, RuntimeError):
 			pass
 
-		# Size estimate
+		# Size estimate — shifted right by PLOT_PAD (16) so its left edge
+		# aligns with the chart's internal text inset, not the chart's view
+		# bounds. v1.2.18 fix for the visible misalignment between the
+		# "N instances · K masters · J ax" line and the chart's axis range
+		# label directly above it.
 		win.sizeEstimate = self._right_label(
-			(right_x, plot_y + plot_h + 8, col_w, 18), '',
+			(right_x + 16, plot_y + plot_h + 8, col_w - 16, 18), '',
 		)
 		try:
 			cell = win.sizeEstimate._nsObject.cell()
@@ -1102,6 +1106,12 @@ class VFClampDialog:
 					NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.18),
 				)
 				tv.setTextColor_(NSColor.labelColor())
+				# v1.2.18: text container inset so log content has visible
+				# left padding instead of sitting flush against the dialog
+				# edge. Vertical inset also gives the first log line a bit
+				# of breathing room from the LOG header above.
+				from Foundation import NSMakeSize as _NSMakeSize
+				tv.setTextContainerInset_(_NSMakeSize(8.0, 4.0))
 		except (AttributeError, RuntimeError):
 			pass
 		try:

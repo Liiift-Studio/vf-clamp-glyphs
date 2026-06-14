@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.18] — 2026-06-13
+
+Three layout fixes from a user screenshot review:
+
+- **Hull plot corner labels moved OUTSIDE the chart border** so they no longer overlap instance dots near the axis extremes (the Daith Adv screenshot showed "100,8" colliding with the bottom-left dot and the right-edge label colliding with the bottom-right dot). y_max sits above the chart in PLOT_PAD; x_min/y_min and x_max sit below the border on their own row. The redundant "full:" subtext is gone since corner labels now convey the axis bounds.
+- **Size estimate line shifted right by 16 px** so its left edge aligns with the chart's internal "wght: lo–hi" text rather than the chart's view bounds. Fixes the visible misalignment between the two adjacent labels.
+- **LOG pane gets text-container insets** (8 × 4 px) so log content has visible left + top padding instead of sitting flush against the dialog edge.
+
+Also: bundle now includes `versions/dialog-v1.2.18.png` showing the dialog after all three fixes, with the same Daith Adv selection the user screenshotted.
+
 ## [1.2.17] — 2026-06-13
 
 User feedback after the v1.2.16 designer signoff: the two-up static specimen made the animated probe ring on the design-space plot feel disconnected (nothing was moving for it to track). Three changes restore the visual link and add a long-requested file-size signal:

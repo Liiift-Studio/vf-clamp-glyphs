@@ -1,5 +1,7 @@
 # vf-clamp-glyphs
 
+![vf-clamp dialog inside Glyphs.app](versions/dialog-v1.2.18.png)
+
 A [Glyphs.app](https://glyphsapp.com) plugin that generates restricted variable
 fonts from any exported TTF/OTF variable font file. Select the named instances
 a customer has licensed, click Generate, and receive a micro-VF that spans
