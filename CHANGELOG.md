@@ -1,5 +1,9 @@
 # Changelog
 
+## [1.2.19] — 2026-06-14
+
+- **Chart pushed down 16 px** (`plot_y_box` 60 → 76) so the y_max corner label drawn at `plot_y_internal − 12` inside the chart's view has visible breathing room above the chart border instead of cramping against the preview-name text directly above it. User screenshot on Daith Adv showed the "96" label sitting almost flush against the preview name line.
+
 ## [1.2.18] — 2026-06-13
 
 Three layout fixes from a user screenshot review:

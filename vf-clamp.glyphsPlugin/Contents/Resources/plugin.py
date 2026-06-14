@@ -859,7 +859,12 @@ class VFClampDialog:
 		# (macOS default), but our Y values throughout this dialog are top-
 		# left. Convert top-y → bottom-y before constructing the frame.
 		# Vanilla widgets auto-flip; raw NSView addSubview_ does not.
-		plot_y_box = 60
+		# v1.2.19: bumped from 60 → 76 so the y_max corner label (drawn at
+		# plot_y_internal - 12 inside the chart's view) has visual breathing
+		# room above the chart border instead of cramping against the
+		# preview-name text directly above it. User screenshot showed the
+		# "96" label sitting almost flush with the preview name line.
+		plot_y_box = 76
 		# v1.2.14 pulled back from 175 → 150 after the second designer
 		# review flagged Zone 2's vertical balance as compromised — the
 		# 175-px plot starved the specimen area below. 150 is still a
