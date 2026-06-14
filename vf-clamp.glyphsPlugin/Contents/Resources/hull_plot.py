@@ -17,6 +17,7 @@ try:
 		NSForegroundColorAttributeName,
 		NSFontAttributeName,
 		NSTimer,
+		NSAccessibilityElement,
 	)
 	from Foundation import NSMakeRect, NSMakePoint  # type: ignore
 	_APPKIT_AVAILABLE = True
@@ -42,6 +43,90 @@ def is_available() -> bool:
 
 
 if _APPKIT_AVAILABLE:
+
+	class _HullDotAccessibilityElement(NSAccessibilityElement):
+		"""NSAccessibilityElement proxy for a single instance dot.
+
+		HullPlotView paints all 36 (or however many) instance dots into a
+		single NSView, so VoiceOver has no per-dot subview to navigate. We
+		fix that by handing VoiceOver a list of these proxy elements — one
+		per instance — each with role=AXButton, a dynamic label that
+		describes the instance's name + axis values + selection state, an
+		accessibilityFrame computed from the last drawn dot position, and
+		an accessibilityPerformPress that fires the same callback as a
+		mouse click. Result: VoiceOver users can navigate dot-by-dot and
+		toggle selections, the same way sighted users do.
+		"""
+
+		def initWithDotIndex_view_(self, idx, view):
+			self = objc.super(_HullDotAccessibilityElement, self).init()
+			if self is None:
+				return None
+			self._idx = int(idx)
+			self._view_ref = view
+			return self
+
+		def accessibilityRole(self):
+			return 'AXButton'
+
+		def accessibilityRoleDescription(self):
+			return 'instance dot'
+
+		def accessibilityLabel(self):
+			view = self._view_ref
+			if view is None:
+				return ''
+			try:
+				coords = view._instances[self._idx]
+				checked = self._idx in view._selected
+				parts = [f'{tag} {v:g}' for tag, v in coords.items()]
+				state = 'selected' if checked else 'unselected'
+				return f'Instance {self._idx + 1}: {", ".join(parts)}, {state}'
+			except (IndexError, AttributeError, KeyError):
+				return ''
+
+		def isAccessibilityElement(self):
+			return True
+
+		def accessibilityParent(self):
+			return self._view_ref
+
+		def accessibilityFrame(self):
+			"""Screen-space rect of this dot — looked up from the last draw."""
+			view = self._view_ref
+			if view is None:
+				return NSMakeRect(0.0, 0.0, 0.0, 0.0)
+			zones = getattr(view, '_instance_hit_zones', None)
+			if not zones:
+				return NSMakeRect(0.0, 0.0, 0.0, 0.0)
+			try:
+				for idx, cx, cy in zones:
+					if idx == self._idx:
+						local = NSMakeRect(cx - 7, cy - 7, 14, 14)
+						# View-relative → window → screen.
+						in_win = view.convertRect_toView_(local, None)
+						win = view.window()
+						if win is None:
+							return in_win
+						return win.convertRectToScreen_(in_win)
+			except (AttributeError, RuntimeError):
+				pass
+			return NSMakeRect(0.0, 0.0, 0.0, 0.0)
+
+		def accessibilityPerformPress(self):
+			"""Toggle this instance — same path as a mouse click on the dot."""
+			view = self._view_ref
+			if view is None:
+				return False
+			cb = getattr(view, '_on_instance_click', None)
+			if cb is None:
+				return False
+			try:
+				cb(self._idx)
+				return True
+			except Exception:
+				return False
+
 
 	class HullPlotView(NSView):
 		"""Custom NSView rendering 1- or 2-axis hull previews.
@@ -128,6 +213,34 @@ if _APPKIT_AVAILABLE:
 				)
 			except Exception:
 				return ''
+
+		def isAccessibilityElement(self):
+			"""Force VoiceOver to treat the chart as a navigable group."""
+			return True
+
+		def accessibilityChildren(self):
+			"""Expose one navigable child per instance dot.
+
+			Cached lazily and rebuilt whenever the instance list changes.
+			VoiceOver users navigate dot-by-dot with VO + arrow keys and
+			toggle each one with VO + Space, matching the mouse-click
+			behaviour exactly.
+			"""
+			if not getattr(self, '_a11y_children_dirty', True):
+				cached = getattr(self, '_a11y_children_cache', None)
+				if cached is not None:
+					return cached
+			n = len(self._instances)
+			children = []
+			for i in range(n):
+				elem = _HullDotAccessibilityElement.alloc().initWithDotIndex_view_(
+					i, self,
+				)
+				if elem is not None:
+					children.append(elem)
+			self._a11y_children_cache = children
+			self._a11y_children_dirty = False
+			return children
 
 		def setHull_axisRanges_axisColors_(self, hull, axis_ranges, axis_colors):
 			"""Update the model and request a redraw.
@@ -228,12 +341,19 @@ if _APPKIT_AVAILABLE:
 			index whenever the user clicks the dot. Pass ``None`` to disable
 			click handling (e.g. before any font is loaded).
 			"""
+			prev_len = len(getattr(self, '_instances', []))
 			self._instances = list(instances or [])
 			try:
 				self._selected = set(int(i) for i in (selected_indices or []))
 			except (TypeError, ValueError):
 				self._selected = set()
 			self._on_instance_click = on_click
+			# v1.2.15: invalidate the a11y children cache whenever the
+			# instance roster changes so VoiceOver picks up new/removed
+			# dots without restarting. (Selection-only changes don't need
+			# a new cache because each child's label is computed lazily.)
+			if len(self._instances) != prev_len:
+				self._a11y_children_dirty = True
 			try:
 				self.setNeedsDisplay_(True)
 			except Exception:
@@ -246,6 +366,31 @@ if _APPKIT_AVAILABLE:
 		def acceptsFirstMouse_(self, event):
 			"""Accept clicks even when the dialog is in the background."""
 			return True
+
+		def acceptsFirstResponder(self):
+			"""Allow keyboard focus so Tab can cycle to the chart.
+
+			v1.2.15 a11y addition: the Accessibility Engineer flagged that
+			the chart was unreachable by keyboard. Becoming first responder
+			lets Tab focus land here and lets us paint the focus ring below.
+			"""
+			return True
+
+		def becomeFirstResponder(self):
+			"""Trigger a redraw so the focus ring paints."""
+			try:
+				self.setNeedsDisplay_(True)
+			except Exception:
+				pass
+			return objc.super(HullPlotView, self).becomeFirstResponder()
+
+		def resignFirstResponder(self):
+			"""Trigger a redraw so the focus ring clears."""
+			try:
+				self.setNeedsDisplay_(True)
+			except Exception:
+				pass
+			return objc.super(HullPlotView, self).resignFirstResponder()
 
 		def mouseDown_(self, event):
 			"""Toggle the instance nearest to the click point.
@@ -289,6 +434,28 @@ if _APPKIT_AVAILABLE:
 				self._draw()
 			except Exception:
 				# Last-resort: leave the canvas blank rather than crash Glyphs.
+				pass
+			# v1.2.15 keyboard focus ring — painted last so it sits above the
+			# chart contents. Only renders when this view is first responder.
+			try:
+				window = self.window()
+				is_focus = (
+					window is not None
+					and window.firstResponder() is self
+				)
+				if is_focus:
+					bounds = self.bounds()
+					ring = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+						NSMakeRect(
+							bounds.origin.x + 1, bounds.origin.y + 1,
+							bounds.size.width - 2, bounds.size.height - 2,
+						),
+						4.0, 4.0,
+					)
+					NSColor.controlAccentColor().set()
+					ring.setLineWidth_(2.0)
+					ring.stroke()
+			except Exception:
 				pass
 
 		def _draw(self):
@@ -640,23 +807,62 @@ if _APPKIT_AVAILABLE:
 			# selection in the context of the design space. Axes whose
 			# selection collapses to a single value get a "pinned" tag
 			# instead of an awkward "253–253" range.
+			#
+			# v1.2.15 defensive layout: for fonts with multiple long axis
+			# tags (GRAD, XTRA, MONO) the combined " on one line"
+			# rendering ran off the chart. Measure first, then split onto
+			# two stacked lines per axis if a single line would overflow.
 			def _fmt(tag, lo, hi):
 				if lo == hi:
 					return f'{tag}: pinned {lo:g}'
 				return f'{tag}: {lo:g}–{hi:g}'
-			label = f'{_fmt(tag_x, lo_x, hi_x)}   {_fmt(tag_y, lo_y, hi_y)}'
-			self._draw_label(label, NSMakePoint(pad, plot_y + plot_h + 2))
-			full = (
-				f'full: {tag_x} {ax_x_min:g}–{ax_x_max:g}   '
-				f'{tag_y} {ax_y_min:g}–{ax_y_max:g}'
-			)
+			part_x = _fmt(tag_x, lo_x, hi_x)
+			part_y = _fmt(tag_y, lo_y, hi_y)
+			single = f'{part_x}   {part_y}'
+			available_w = bounds.size.width - 2 * pad
+			measure_attrs = {
+				NSFontAttributeName: NSFont.systemFontOfSize_(
+					NSFont.smallSystemFontSize(),
+				),
+			}
+			single_w = NSAttributedString.alloc().initWithString_attributes_(
+				single, measure_attrs,
+			).size().width
+			if single_w <= available_w:
+				self._draw_label(single, NSMakePoint(pad, plot_y + plot_h + 2))
+				full_y = plot_y + plot_h + 16
+			else:
+				# Stack each axis on its own line.
+				self._draw_label(part_x, NSMakePoint(pad, plot_y + plot_h + 2))
+				self._draw_label(part_y, NSMakePoint(pad, plot_y + plot_h + 14))
+				full_y = plot_y + plot_h + 28
+			# Full-range subtext also gets the same wrap treatment.
+			full_x = f'full: {tag_x} {ax_x_min:g}–{ax_x_max:g}'
+			full_y_part = f'{tag_y} {ax_y_min:g}–{ax_y_max:g}'
+			full_single = f'{full_x}   {full_y_part}'
+			full_measure = NSAttributedString.alloc().initWithString_attributes_(
+				full_single,
+				{NSFontAttributeName: NSFont.systemFontOfSize_(9.0)},
+			).size().width
 			try:
 				attrs = {
 					NSForegroundColorAttributeName: NSColor.tertiaryLabelColor(),
 					NSFontAttributeName: NSFont.systemFontOfSize_(9.0),
 				}
-				s = NSAttributedString.alloc().initWithString_attributes_(full, attrs)
-				s.drawAtPoint_(NSMakePoint(pad, plot_y + plot_h + 16))
+				if full_measure <= available_w:
+					s = NSAttributedString.alloc().initWithString_attributes_(
+						full_single, attrs,
+					)
+					s.drawAtPoint_(NSMakePoint(pad, full_y))
+				else:
+					s1 = NSAttributedString.alloc().initWithString_attributes_(
+						full_x, attrs,
+					)
+					s2 = NSAttributedString.alloc().initWithString_attributes_(
+						f'      {full_y_part}', attrs,
+					)
+					s1.drawAtPoint_(NSMakePoint(pad, full_y))
+					s2.drawAtPoint_(NSMakePoint(pad, full_y + 12))
 			except Exception:
 				pass
 

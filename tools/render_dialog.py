@@ -440,14 +440,14 @@ class DialogMockView(NSView):
 		# --- Action bar -----------------------------------------------------
 		# Left side: small toggle buttons that mirror the +A select-all chips.
 		ab_y = y + 18
-		left_chips = ['⌥A All', '⌥N None', '⌥I Invert', '↵ Generate']
+		left_chips = ['⌘A All', '⌘D None', '⌘I Invert', '⇥ Navigate', '␣ Toggle', '⏎ Generate']
 		cx = PAD
 		for chip in left_chips:
 			_text(
 				chip, NSMakePoint(cx, ab_y + 4),
 				size=10.5, color=NSColor.secondaryLabelColor(),
 			)
-			cx += 70
+			cx += 72
 		# Right side: Cancel + Generate
 		right_x_btn = w - PAD - 140 - 8 - 80
 		_button(right_x_btn, ab_y - 6, 80, 28, 'Cancel')

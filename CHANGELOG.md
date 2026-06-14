@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.2.15] — 2026-06-13
+
+Five remaining-polish items the second designer review flagged, all landed in one pass:
+
+- **Log pane unread indicator** — a 3-px accent stripe pinned to the left edge of the LOG flashes for ~0.8 seconds (NSTimer-driven fade at 30 fps) every time `_log_append` adds a line. Implemented as new `_LogActivityStripe` NSView subclass. Addresses Interaction Designer's "log lacks read/unread affordance" finding.
+- **Shortcut hint text expanded** to include keyboard navigation: `⌘A All   ⌘D None   ⌘I Invert   ⇥ Navigate   ␣ Toggle   ⏎ Generate`. Spinner widget pushed right (PAD+550) to clear the wider hint string. Accessibility Engineer flagged keyboard discovery as undocumented.
+- **Defensive long-tag wrapping** in the hull plot labels: measures the combined "{tag_x}: lo–hi  {tag_y}: lo–hi" width before drawing and falls back to a stacked two-line layout when it would overflow the chart. Handles GRAD, XTRA, MONO and similar 4-letter axis tags without word-wrap or truncation.
+- **Keyboard focus ring on HullPlotView**: `acceptsFirstResponder` returns True; `becomeFirstResponder`/`resignFirstResponder` trigger redraws; a 2-pt control-accent rounded rectangle paints around the chart when the view holds focus.
+- **Per-dot accessibility children**: new `_HullDotAccessibilityElement` (NSAccessibilityElement subclass) per instance with role=AXButton, dynamic label ("Instance N: wght X, opsz Y, selected/unselected"), an accessibilityFrame computed from the last drawn dot position, and an accessibilityPerformPress that toggles selection via the same callback path as a mouse click. HullPlotView's `accessibilityChildren` returns the full list (cached, invalidated on roster change). VoiceOver users can now navigate dot-by-dot and toggle selections, fully matching mouse behaviour.
+
 ## [1.2.14] — 2026-06-13
 
 Six refinements landed in one cycle from the second multi-designer review against v1.2.13:

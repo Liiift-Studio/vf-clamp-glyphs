@@ -43,6 +43,8 @@ from AppKit import (
 	NSDragOperationNone,
 	NSFilenamesPboardType,
 	NSPasteboardTypeFileURL,
+	NSRectFill,
+	NSMakeRect,
 )
 
 
@@ -268,6 +270,82 @@ VFClampPlugin = LiiiftVFClampPlugin
 # Drag-drop NSView — accepts font files dropped onto the file-source path
 # field and routes them through the dialog's _load_font helper.
 # ---------------------------------------------------------------------------
+
+class _LogActivityStripe(NSView):
+	"""Thin accent-coloured strip pinned to the left edge of the LOG pane.
+
+	Flashes for ~0.8 seconds each time ``flash()`` is called (which the
+	dialog wires into ``_log_append``), giving users a peripheral cue that
+	new content has landed in the log without stealing focus. Addresses the
+	Interaction Designer's "log lacks read/unread affordance" finding.
+	"""
+
+	def init(self):
+		self = objc.super(_LogActivityStripe, self).init()
+		if self is None:
+			return None
+		self._alpha = 0.0
+		self._fade_timer = None
+		return self
+
+	def isFlipped(self):
+		return True
+
+	def isOpaque(self):
+		return False
+
+	def acceptsFirstResponder(self):
+		return False
+
+	def flash(self):
+		"""Re-trigger the strip's fade to maximum brightness."""
+		from AppKit import NSTimer
+		self._alpha = 1.0
+		t = self._fade_timer
+		if t is not None:
+			try:
+				t.invalidate()
+			except (AttributeError, RuntimeError):
+				pass
+		try:
+			self._fade_timer = (
+				NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+					1.0 / 30.0, self, 'tickFade:', None, True,
+				)
+			)
+		except (AttributeError, RuntimeError):
+			self._fade_timer = None
+		try:
+			self.setNeedsDisplay_(True)
+		except Exception:
+			pass
+
+	def tickFade_(self, _timer):
+		"""NSTimer callback — decay alpha + invalidate when faded out."""
+		# 24 frames at 30 fps == 0.8 s total fade duration.
+		self._alpha = max(0.0, self._alpha - 1.0 / 24.0)
+		try:
+			self.setNeedsDisplay_(True)
+		except Exception:
+			pass
+		if self._alpha <= 0.0:
+			t = self._fade_timer
+			self._fade_timer = None
+			if t is not None:
+				try:
+					t.invalidate()
+				except (AttributeError, RuntimeError):
+					pass
+
+	def drawRect_(self, _rect):
+		if self._alpha <= 0.0:
+			return
+		try:
+			NSColor.controlAccentColor().colorWithAlphaComponent_(self._alpha).set()
+			NSRectFill(self.bounds())
+		except Exception:
+			pass
+
 
 class _FontDropView(NSView):
 	"""Transparent NSView overlay that accepts dragged font files.
@@ -1033,6 +1111,25 @@ class VFClampDialog:
 			)
 		except (AttributeError, RuntimeError):
 			pass
+		# v1.2.15 activity stripe — thin accent bar pinned to the LOG's
+		# left edge. Flashes for ~0.8 s each time _log_append adds a line
+		# so users get a peripheral signal that new content arrived without
+		# stealing focus. Mounted directly on the window's contentView so
+		# it sits ABOVE the NSScrollView and doesn't get clipped.
+		try:
+			stripe_w = 3
+			stripe_y_top = y + 18
+			stripe_h = LOG_H - 18
+			window_h = self._compute_window_height()
+			stripe_y_flipped = window_h - stripe_y_top - stripe_h
+			stripe = _LogActivityStripe.alloc().init()
+			stripe.setFrame_(NSMakeRect(
+				PAD, stripe_y_flipped, stripe_w, stripe_h,
+			))
+			win._window.contentView().addSubview_(stripe)
+			self._log_activity_stripe = stripe
+		except (AttributeError, RuntimeError):
+			self._log_activity_stripe = None
 		# Hint text on first launch so the empty pane doesn't look broken.
 		self._log_append('Ready. Pick instances and click Generate.')
 		return y + LOG_H + PAD
@@ -1045,9 +1142,13 @@ class VFClampDialog:
 		# Shortcut hints on the left, vertically aligned with the buttons.
 		# Action bar interior: buttons sit at y+12 with the Generate button
 		# vertically centred against the 32-px footprint.
+		# v1.2.15: expanded the hint string with ⇥ (Tab) navigation and ␣
+		# (Space) toggle after the Accessibility Engineer flagged that
+		# keyboard discovery was undocumented — the bulk-select chords
+		# were listed but the everyday Tab/Space pattern was not.
 		win.shortcutHints = vanilla.TextBox(
-			(PAD, y + 18, 380, 18),
-			'⌘A All   ⌘D None   ⌘I Invert   ⏎ Generate',
+			(PAD, y + 18, 540, 18),
+			'⌘A All   ⌘D None   ⌘I Invert   ⇥ Navigate   ␣ Toggle   ⏎ Generate',
 			sizeStyle='small',
 			selectable=False,
 		)
@@ -1062,8 +1163,8 @@ class VFClampDialog:
 		except Exception:
 			pass
 
-		# Spinner + status
-		win.spinner = vanilla.ProgressSpinner((PAD + 380, y + 20, 16, 16), displayWhenStopped=False)
+		# Spinner + status — pushed right to clear the wider v1.2.15 hint string.
+		win.spinner = vanilla.ProgressSpinner((PAD + 550, y + 20, 16, 16), displayWhenStopped=False)
 		try:
 			win.spinner.stop()
 		except Exception:
@@ -2620,12 +2721,21 @@ class VFClampDialog:
 
 		Truncates the log when it exceeds ~5 KB so the pane never grows
 		without bound across a long debugging session.
+
+		v1.2.15 also flashes the log activity stripe on the left edge so the
+		user gets a peripheral signal that new content arrived.
 		"""
 		if not message:
 			return
 		editor = getattr(self.w, 'logEditor', None)
 		if editor is None:
 			return
+		stripe = getattr(self, '_log_activity_stripe', None)
+		if stripe is not None:
+			try:
+				stripe.flash()
+			except (AttributeError, RuntimeError):
+				pass
 		try:
 			existing = editor.get() or ''
 			if existing and not existing.endswith('\n'):
