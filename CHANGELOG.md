@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.17] — 2026-06-13
+
+User feedback after the v1.2.16 designer signoff: the two-up static specimen made the animated probe ring on the design-space plot feel disconnected (nothing was moving for it to track). Three changes restore the visual link and add a long-requested file-size signal:
+
+- **Single animated specimen restored** (replaces the v1.2.13 two-up lightest/heaviest layout). "HOHO Anes" sweeps through the licensed design space at 48 pt with a live caption showing the current `wght X · opsz Y`. The probe ring's path now reads naturally because the specimen visibly moves along the same path.
+- **Probe ring simplified to white fill at 25 % alpha** — single solid translucent dot, no two-pass halo + bright stroke. Reads as a soft tracker rather than a heavy badge on top of the chart.
+- **Master + axis counters in the size-estimate line**: now reads `~38 KB · 5 instances · 5 masters · 2 ax · 1 pinned` instead of just `~38 KB · 5 instances`. New `_count_structural` helper iterates the GSFont masters and counts those whose coordinates fall inside the hull range on every axis, plus reports total axes and pinned axes. Helps users understand what's actually driving the file size before they generate.
+- Specimen size restored 32 → 48 pt now that the preview is a single specimen again (the 32 pt two-up cap is gone).
+
 ## [1.2.16] — 2026-06-13
 
 - **User-facing terminology rename**: "hull" → "design space" / "axis ranges" in everything a user actually reads (VoiceOver labels, accessibility values, error messages, the chips-fallback label). Code-internal `hull`, `_hull`, `compute_hull`, `setHull_` etc. stay — they're correctly typed and the refactor cost is high — but the strings a font engineer actually encounters now use the terminology the type-design community already knows.

@@ -778,27 +778,17 @@ if _APPKIT_AVAILABLE:
 				try:
 					px = normx(float(probe_x))
 					py = normy(float(probe_y))
-					# v1.2.14: shrunk from 7.5 → 6.5 because Info Designer
-					# flagged that a 7.5-px probe drawn over a 5-px selected
-					# dot could read as one combined shape rather than as a
-					# distinct tracker. 6.5 keeps a clear gap and proportion.
+					# v1.2.17: simplified to a single solid white fill at
+					# 25 % alpha. The previous two-pass halo + bright stroke
+					# read as a heavy badge sitting on top of the chart; a
+					# soft translucent fill reads as a gentle tracker that
+					# pairs naturally with the live animated specimen below.
 					probe_r = 6.5
-					# Two-pass ring: a dark halo first, then a bright stroke
-					# on top. This guarantees enough contrast whether the
-					# probe is sitting over the translucent hull fill, a dot
-					# inside the hull, or empty design space.
-					halo = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
+					probe = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
 						px - probe_r, py - probe_r, probe_r * 2, probe_r * 2,
 					))
-					NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.55).set()
-					halo.setLineWidth_(3.5)
-					halo.stroke()
-					ring = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(
-						px - probe_r, py - probe_r, probe_r * 2, probe_r * 2,
-					))
-					NSColor.labelColor().set()
-					ring.setLineWidth_(2.0)
-					ring.stroke()
+					NSColor.whiteColor().colorWithAlphaComponent_(0.25).set()
+					probe.fill()
 				except (TypeError, ValueError):
 					pass
 

@@ -921,14 +921,13 @@ class VFClampDialog:
 				try:
 					win._window.contentView().addSubview_(pv)
 					self._preview_view = pv
-					# Specimen size — v1.2.13 dropped from 54 → 32 because
-					# the preview view became a two-up layout showing the
-					# lightest and heaviest hull instances side by side.
-					# Each half is only ~180 px wide; 32 pt fits "HOHO Anes"
-					# comfortably without bumping the divider on the
-					# heaviest-weight side.
+					# Specimen size — v1.2.17 back up to 48 pt now that the
+					# preview is a single animated specimen again (no longer
+					# two-up). 48 pt fills the right column well even at the
+					# heaviest weight + sits comfortably in the ~100-px
+					# preview height left after the 150-px plot above.
 					try:
-						pv.setFontSize_(32.0)
+						pv.setFontSize_(48.0)
 					except (AttributeError, RuntimeError):
 						pass
 					# v1.2.10 animation probe: feed the specimen's tick into
@@ -2670,25 +2669,95 @@ class VFClampDialog:
 
 	@objc.python_method
 	def _refresh_size_estimate(self, selected):
-		"""Update the size-estimate line beside the hull plot."""
+		"""Update the size-estimate line beside the hull plot.
+
+		v1.2.17 enriches the line with the structural counts that actually
+		drive file size: number of masters retained in the clamp, number of
+		axes in the output design space, and how many of those axes pinned
+		to a single value (no longer variable). Without this, "≈ 38 KB"
+		looked like a hand-wave; with it, the user can see that the size
+		falls because masters are dropped and axes are pinned.
+		"""
 		if not selected:
 			text = ''
 		else:
 			n = len(selected)
 			total = max(1, len(self._instance_names))
-			# Simple heuristic — output ≈ source * ratio (clamped 30%-100%).
-			# Glyphs sources don't expose the eventual binary size so we
-			# only show a count when there's no source size to scale from.
+			parts = [f'{n} instance{"s" if n != 1 else ""}']
+
+			# Size heuristic — only applies for File sources where we have
+			# a source byte count to scale.
 			if self._source_size_bytes is not None:
 				ratio = max(0.3, min(1.0, n / total))
 				size_kb = int(self._source_size_bytes * ratio / 1024)
-				text = f'~{size_kb:,} KB · {n} instance{"s" if n != 1 else ""}'
-			else:
-				text = f'{n} instance{"s" if n != 1 else ""} selected'
+				parts.insert(0, f'~{size_kb:,} KB')
+
+			# Structural counts: surviving masters + axis count + pinned.
+			masters, axes, pinned = self._count_structural(selected)
+			if masters is not None:
+				parts.append(f'{masters} master{"s" if masters != 1 else ""}')
+			if axes is not None and axes > 0:
+				if pinned:
+					parts.append(f'{axes} ax · {pinned} pinned')
+				else:
+					parts.append(f'{axes} ax')
+
+			text = '  ·  '.join(parts)
 		try:
 			self.w.sizeEstimate.set(text)
 		except (AttributeError, RuntimeError):
 			pass
+
+	@objc.python_method
+	def _count_structural(self, selected):
+		"""Return (surviving_masters, axis_count, pinned_axes) for the hull.
+
+		Best-effort — returns ``(None, None, None)`` if the source isn't
+		loaded yet or the counts can't be computed. The dialog formats
+		whatever is available, so a partial answer is still useful.
+		"""
+		try:
+			hull = self._compute_current_hull(selected)
+		except Exception:
+			hull = {}
+		if not hull:
+			return (None, None, None)
+
+		axes = len(hull)
+		pinned = sum(1 for lo, hi in hull.values() if lo == hi)
+
+		# Surviving masters — count masters whose coords fall inside the
+		# hull range on every axis. Only computable for GSFont sources;
+		# File sources don't expose master geometry through fonttools at
+		# this level of abstraction (varLib stores variation deltas, not
+		# named masters).
+		masters = None
+		try:
+			if self._source_mode == self.SOURCE_GSFONT and self._gsfont is not None:
+				axis_tags = [
+					getattr(ax, 'axisTag', '') or '' for ax in self._gsfont.axes
+				]
+				count = 0
+				for master in self._gsfont.masters:
+					try:
+						coords = list(master.axes) if hasattr(master, 'axes') else []
+					except (AttributeError, RuntimeError):
+						coords = []
+					ok = True
+					for tag, val in zip(axis_tags, coords):
+						if tag not in hull:
+							continue
+						lo, hi = hull[tag]
+						if not (lo <= float(val) <= hi):
+							ok = False
+							break
+					if ok:
+						count += 1
+				masters = count
+		except Exception:
+			masters = None
+
+		return (masters, axes, pinned)
 
 	def _refresh_generate_button(self, selected=None):
 		"""Enable Generate only when a source is loaded and >=1 instance selected."""

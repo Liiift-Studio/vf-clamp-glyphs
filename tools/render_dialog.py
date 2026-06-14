@@ -479,7 +479,14 @@ def fake_state(selected_indices, log_lines=None):
 		'focus_row': selected[-1] if selected else -1,
 		'filter': '',
 		'preview_name': preview_name,
-		'size_estimate': f'≈ {18 + len(selected) * 4} KB',
+		'size_estimate': (
+			f'~{18 + len(selected) * 4} KB  ·  '
+			f'{len(selected)} instances  ·  '
+			f'{4 + (len(selected) // 5)} masters  ·  '
+			f'{len(hull)} ax'
+			+ (f"  ·  {sum(1 for lo, hi in hull.values() if lo == hi)} pinned"
+			   if any(lo == hi for lo, hi in hull.values()) else '')
+		),
 		'preset': '(no preset)',
 		'output_name': f'Daith Adv {int(min(SIZES))} Extralight-42 Light Italic',
 		'format': '.glyphs',
@@ -542,7 +549,7 @@ def render_dialog(state, anim_phase, out_path, font_path=None):
 	preview_y = plot_y + plot_h + 22
 	preview_h = ZONE2_H - (preview_y - zone2_y) - 16
 	preview = make_preview_view((right_x, preview_y, col_w, preview_h))
-	preview.setFontSize_(32.0)
+	preview.setFontSize_(48.0)
 	preview.setHull_(state['hull'])
 	preview._anim_progress = anim_phase * ANIM_PERIOD
 	if font_path:

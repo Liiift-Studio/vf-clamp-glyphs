@@ -297,21 +297,14 @@ if _APPKIT_AVAILABLE:
 		# --------- private rendering -----------------------------------
 
 		def _draw(self):
-			"""v1.2.13 two-up renderer.
+			"""v1.2.17 single animated specimen.
 
-			Replaces the previous single-specimen-animated-through-hull
-			behaviour with a side-by-side display of the *extremes* of the
-			licensed design space:
-
-			  LEFT  — lightest instance  (axis min on every axis)
-			  RIGHT — heaviest instance  (axis max on every axis)
-
-			Each half is captioned with the literal variation values used,
-			so the user is reading the licensed corners of the hull directly
-			instead of inferring a range from a fly-through. Animation
-			infrastructure is retained: probe coords are still pushed to the
-			hull plot each tick so the ring keeps tracking, but the drawn
-			specimen is static once the hull is set.
+			Renders one HOHO Anes specimen at the current animation phase
+			and pairs it with the live probe ring on the hull plot: the
+			specimen sweeps through the licensed design space and the ring
+			traces the same path. This re-establishes the visual link
+			between the two that the v1.2.13 two-up layout severed (a
+			static specimen made the moving ring feel decorative).
 			"""
 			bounds = self.bounds()
 			from AppKit import NSRectFill  # local import — Foundation is shared
@@ -319,48 +312,52 @@ if _APPKIT_AVAILABLE:
 			bg.set()
 			NSRectFill(bounds)
 
-			# No-selection state: keep the previous 10% opacity hint so the
-			# preview area doesn't draw the eye when there's nothing to show.
+			# No-selection state: keep the 10 % opacity hint so the preview
+			# area doesn't draw the eye when there's nothing to show.
 			if not self._hull:
 				self._draw_hint(bounds)
 				return
 
-			# Compute the two extreme variations from the hull. Pinned axes
-			# (lo == hi) contribute the same value on both sides.
-			low_vars = {tag: float(lo) for tag, (lo, hi) in self._hull.items()}
-			high_vars = {tag: float(hi) for tag, (lo, hi) in self._hull.items()}
-
-			# Build fonts for both extremes; bail if neither resolves.
-			# v1.2.14: render the lightest at 75 % of the heavy size so the
-			# visual weight difference between extremes reads at a glance.
-			# UX Designer flagged the prior equal-size two-up as numerically
-			# correct but visually flat — the size differential restores the
-			# "lighter / heavier" affordance the animated v1.2.10 specimen
-			# used to provide via motion.
-			full_size = self._font_size
-			light_size = full_size * 0.75
-			font_low = self._build_font(low_vars, size=light_size)
-			font_high = self._build_font(high_vars, size=full_size)
-			if font_low is None and font_high is None:
+			# Animated variations + font for this frame.
+			variations = self._current_variations()
+			font = self._build_font(variations)
+			if font is None:
 				return
 
-			# Split the view into two equal halves with a soft divider.
-			half_w = bounds.size.width / 2.0
-			divider_x = bounds.size.width / 2.0
-			NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.10).set()
-			NSRectFill(
-				NSMakeRect(divider_x - 0.5, 12, 1.0, bounds.size.height - 24),
+			# Specimen — centred in the view above the caption strip.
+			para = NSMutableParagraphStyle.alloc().init()
+			para.setAlignment_(NSTextAlignmentCenter)
+			specimen_attrs = {
+				NSFontAttributeName: font,
+				NSForegroundColorAttributeName: NSColor.labelColor(),
+				NSParagraphStyleAttributeName: para,
+			}
+			specimen = NSAttributedString.alloc().initWithString_attributes_(
+				SPECIMEN_TEXT, specimen_attrs,
 			)
+			tsize = specimen.size()
+			specimen.drawAtPoint_(NSMakePoint(
+				(bounds.size.width - tsize.width) / 2.0,
+				(bounds.size.height - tsize.height) / 2.0,
+			))
 
-			# Draw each half.
-			self._draw_half(
-				NSMakeRect(0, 0, half_w, bounds.size.height),
-				font_low, low_vars, label='lightest',
+			# Caption — live variation values that mirror the probe position
+			# inside the hull plot. labelColor (v1.2.14 contrast bump) so
+			# the running values are easy to read at a glance.
+			caption_attrs = {
+				NSFontAttributeName: NSFont.systemFontOfSize_(
+					NSFont.smallSystemFontSize(),
+				),
+				NSForegroundColorAttributeName: NSColor.labelColor(),
+				NSParagraphStyleAttributeName: para,
+			}
+			caption_str = NSAttributedString.alloc().initWithString_attributes_(
+				self._caption_text(variations), caption_attrs,
 			)
-			self._draw_half(
-				NSMakeRect(half_w, 0, half_w, bounds.size.height),
-				font_high, high_vars, label='heaviest',
-			)
+			csize = caption_str.size()
+			caption_str.drawAtPoint_(NSMakePoint(
+				(bounds.size.width - csize.width) / 2.0, 6,
+			))
 
 		def _draw_hint(self, bounds):
 			"""Render a faint specimen at 10% opacity when the hull is empty.
