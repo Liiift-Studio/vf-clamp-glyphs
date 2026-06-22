@@ -184,6 +184,29 @@ hyphen:
 
 ---
 
+## Output fidelity
+
+Beyond restricting the design space, the plugin rewrites the output font's metadata so
+the delivered file is correct and distinct from the source:
+
+- **Name table** — Family (1), Subfamily (2), Full name (4), PostScript (6) and, when
+  present, the typographic/variations IDs (16/17/25) are patched to the restricted range.
+- **STAT** — `AxisValue` records (Format 1–4) and `DesignAxisRecord` entries that
+  reference an axis the instancer pinned out are pruned, so OS/CSS style-matching stays
+  coherent.
+- **OS/2 + head** — `usWeightClass`, `usWidthClass`, the BOLD/ITALIC bits of
+  `fsSelection`, and `head.macStyle` are recomputed from the restricted font's new
+  default instance.
+
+### Known limitation / roadmap
+
+- **nameID 3 (Unique font identifier) is not yet regenerated.** The restricted file
+  inherits the source's Unique ID, which can collide with the source in OS font caches.
+  The web/CLI core (`@liiift-studio/vf-clamp`) and the RoboFont extension already
+  regenerate it; bringing that here is a planned enhancement.
+
+---
+
 ## Development
 
 ```bash
