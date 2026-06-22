@@ -8,14 +8,49 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-# Default on-disk locations. Both files live next to the bundled plugin in
-# Glyphs' Application Support folder so they persist across reinstalls but
-# remain easy to wipe by hand.
+# Default on-disk locations. We keep presets + the recent-folders MRU in a
+# vendor-namespaced Application Support folder of our own rather than inside
+# Glyphs' Plugins folder. The Plugins folder is reserved by Glyphs for plugin
+# bundles only — writing plain data files there is unexpected and was reported
+# upstream (issue #84). The bundle ID namespace keeps our data out of the way
+# while still persisting across plugin reinstalls and staying easy to wipe.
 DEFAULT_SUPPORT_DIR = Path(
-	'~/Library/Application Support/Glyphs 3/Plugins/vf-clamp'
+	'~/Library/Application Support/studio.liiift.vf-clamp'
 ).expanduser()
 DEFAULT_PRESETS_PATH = DEFAULT_SUPPORT_DIR / 'presets.json'
 DEFAULT_RECENTS_PATH = DEFAULT_SUPPORT_DIR / 'recent.json'
+
+# Pre-#84 location: data used to live inside Glyphs' Plugins folder. We migrate
+# any files found here to DEFAULT_SUPPORT_DIR on first access so existing users
+# keep their presets and recent folders after upgrading.
+LEGACY_SUPPORT_DIR = Path(
+	'~/Library/Application Support/Glyphs 3/Plugins/vf-clamp'
+).expanduser()
+
+
+def migrate_legacy_support_dir(
+	legacy_dir: Path = LEGACY_SUPPORT_DIR,
+	new_dir: Path = DEFAULT_SUPPORT_DIR,
+) -> None:
+	"""Move pre-#84 presets/recent files into the new support dir if needed.
+
+	Best-effort and idempotent: only copies a legacy file when the new
+	location does not already have it, and never raises — a failed migration
+	must not break plugin startup. Leaves the legacy files in place so a
+	downgrade still finds them.
+	"""
+	try:
+		if not legacy_dir.is_dir():
+			return
+		new_dir.mkdir(parents=True, exist_ok=True)
+		for filename in ('presets.json', 'recent.json'):
+			src = legacy_dir / filename
+			dst = new_dir / filename
+			if src.is_file() and not dst.exists():
+				dst.write_bytes(src.read_bytes())
+	except OSError:
+		# Migration is opportunistic — silently give up on any I/O error.
+		return
 
 # Cap on how many recent folders we keep. Five matches Finder's "Recent Places"
 # menu density and keeps the popup short enough to read at a glance.

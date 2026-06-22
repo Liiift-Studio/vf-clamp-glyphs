@@ -15,6 +15,15 @@ the same `compact_name` algorithm; behavioural parity is tracked in
 
 ---
 
+## Try it live
+
+Want to see what the engine does before installing the plugin? The interactive
+web demo at **[vfclamp.com](https://vfclamp.com)** runs the same clamping engine
+in your browser — drop in a variable font, pick named instances, and download
+the restricted micro-VF. No Glyphs.app required.
+
+---
+
 ## Requirements
 
 | Requirement                | Version            |
@@ -48,18 +57,22 @@ message in that case.
    shasum -a 256 vf-clamp-glyphs.zip
    # compare against vf-clamp-glyphs.zip.sha256
    ```
-2. Unzip and double-click `vf-clamp.glyphsPlugin`. Glyphs installs it under:
-   ```
-   ~/Library/Application Support/Glyphs 3/Plugins/
-   ```
-   (create that folder if it does not exist).
-3. If macOS Gatekeeper blocks the unsigned bundle, clear the quarantine bit:
-   ```bash
-   xattr -d com.apple.quarantine ~/Library/Application\ Support/Glyphs\ 3/Plugins/vf-clamp.glyphsPlugin
-   ```
-   Or right-click the bundle in Finder and choose **Open** once.
-4. Restart Glyphs 3. The plugin appears under
+2. Unzip, then **drag `vf-clamp.glyphsPlugin` onto the Glyphs app icon** (in
+   the Dock or in Applications). Glyphs installs it under
+   `~/Library/Application Support/Glyphs 3/Plugins/` and offers to restart.
+
+   > Don't double-click the bundle in Finder — because it is unsigned, macOS
+   > Gatekeeper blocks it and Glyphs never loads it. Dragging it onto the
+   > Glyphs app icon lets Glyphs install it for you and sidesteps Gatekeeper.
+
+3. Restart Glyphs 3 when prompted. The plugin appears under
    **Script › vf-clamp › Generate Restricted VFs…**.
+
+   If you previously tried double-clicking and macOS quarantined the bundle,
+   clear the quarantine bit and re-drag it onto the Glyphs icon:
+   ```bash
+   xattr -dr com.apple.quarantine vf-clamp.glyphsPlugin
+   ```
 
 ---
 

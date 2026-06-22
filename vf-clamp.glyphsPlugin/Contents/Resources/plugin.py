@@ -170,6 +170,7 @@ from presets import (  # noqa: E402
 	save_recent_folders,
 	push_recent_folder,
 	validate_output_name,
+	migrate_legacy_support_dir,
 	RECENT_FOLDERS_MAX,
 )
 from hull_plot import make_hull_plot_view, is_available as hull_plot_available  # noqa: E402
@@ -530,6 +531,12 @@ class VFClampDialog:
 		self._open_after_save = False
 
 		# Persistent state — presets + recents. Failures fall back to empty.
+		# Migrate any pre-#84 data out of Glyphs' Plugins folder first so
+		# upgraders keep their saved presets and recent-folder MRU.
+		try:
+			migrate_legacy_support_dir()
+		except Exception:
+			pass
 		try:
 			self._presets = load_presets()
 		except Exception:

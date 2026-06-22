@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.20] — 2026-06-22
+
+Two upstream issue fixes plus a README addition:
+
+- **Plugin data moved out of Glyphs' Plugins folder** (issue #84, reported by @florianpircher). Presets and the recent-folders MRU previously lived in `~/Library/Application Support/Glyphs 3/Plugins/vf-clamp/`, but that folder is reserved by Glyphs for plugin bundles only. They now live in the vendor-namespaced `~/Library/Application Support/studio.liiift.vf-clamp/`. `presets.migrate_legacy_support_dir()` runs once on first launch to move any existing `presets.json` / `recent.json` to the new location (best-effort, idempotent, never overwrites newer data, leaves legacy files in place for downgrades).
+- **Corrected install instructions** (issue #83, reported by @schriftgestalt). Double-clicking the unsigned `.glyphsPlugin` in Finder is blocked by macOS Gatekeeper and never loads. The README and CLAUDE.md now tell users to drag the bundle onto the Glyphs app icon, which lets Glyphs install it and sidesteps Gatekeeper. The quarantine-clearing note is kept as a fallback for anyone who already tried double-clicking.
+- **Added a "Try it live" section** to the README linking the [vfclamp.com](https://vfclamp.com) web demo of the same clamping engine.
+
 ## [1.2.19] — 2026-06-14
 
 - **Chart pushed down 16 px** (`plot_y_box` 60 → 76) so the y_max corner label drawn at `plot_y_internal − 12` inside the chart's view has visible breathing room above the chart border instead of cramping against the preview-name text directly above it. User screenshot on Daith Adv showed the "96" label sitting almost flush against the preview name line.

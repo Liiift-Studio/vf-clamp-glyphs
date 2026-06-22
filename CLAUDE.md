@@ -38,13 +38,18 @@ one restricted VF with the correct name table — matching the delivery behaviou
 
 ## Installation
 
-Double-click `vf-clamp.glyphsPlugin` in Finder, or drag it to:
-
-```
-~/Library/Application Support/Glyphs 3/Plugins/
-```
+Drag `vf-clamp.glyphsPlugin` onto the Glyphs app icon (Dock or Applications).
+Glyphs installs it under `~/Library/Application Support/Glyphs 3/Plugins/` and
+offers to restart. Do NOT double-click the bundle in Finder — it is unsigned,
+so macOS Gatekeeper blocks it and Glyphs never loads it.
 
 Restart Glyphs. The menu item appears under **Script › vf-clamp › Generate Restricted VFs…**
+
+Plugin data (presets, recent-folders MRU) lives in
+`~/Library/Application Support/studio.liiift.vf-clamp/` — a vendor-namespaced
+folder, NOT inside Glyphs' Plugins folder, which is reserved for plugin bundles
+(issue #84). `presets.migrate_legacy_support_dir()` moves pre-#84 data over on
+first launch.
 
 ## Usage Flow
 
